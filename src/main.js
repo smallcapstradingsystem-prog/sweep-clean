@@ -1148,7 +1148,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       hide('#connected-banner');
     });
   });
-  showWalletSection('mnemonic');
+
+  // Show the section that matches whichever radio has `checked` in
+  // app.html. Falls back to 'extension' if nothing is checked.
+  const initialWalletType = $('input[name=wallet-type]:checked')?.value || 'extension';
+  showWalletSection(initialWalletType);
 
   ['#family-evm', '#family-solana', '#family-bitcoin'].forEach((sel) => {
     const el = $(sel);

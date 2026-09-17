@@ -40,14 +40,14 @@
         <section class="card">
             <h2>1. Wallet source</h2>
             <div class="checks">
-                <label><input type="radio" name="wallet-type" value="extension"> Browser extension (MetaMask, Rabby, Coinbase)</label>
+                <label><input type="radio" name="wallet-type" value="extension" checked> Browser extension (MetaMask, Rabby, Coinbase)</label>
                 <label><input type="radio" name="wallet-type" value="walletconnect"> WalletConnect QR code (MetaMask Mobile, Rainbow, Trust)</label>
-                <label><input type="radio" name="wallet-type" value="mnemonic" checked> Paste mnemonic(s)</label>
+                <label><input type="radio" name="wallet-type" value="mnemonic"> Paste mnemonic(s)</label>
                 <label><input type="radio" name="wallet-type" value="ledger"> Ledger (WebHID)</label>
                 <label><input type="radio" name="wallet-type" value="trezor"> Trezor</label>
             </div>
 
-            <div id="wallet-extension" class="wallet-section" style="display:none;">
+            <div id="wallet-extension" class="wallet-section">
                 <p class="hint" style="margin-top: 16px;">
                     Connect with the wallet extension installed in your browser.
                     Works with MetaMask, Rabby, Coinbase Wallet, Brave Wallet, and others.
@@ -75,7 +75,7 @@
                 </p>
             </div>
 
-            <div id="wallet-mnemonic" class="wallet-section">
+            <div id="wallet-mnemonic" class="wallet-section" style="display:none;">
                 <p class="hint" style="margin-top: 16px;">One mnemonic per line. BIP-39 (12 or 24 words).</p>
                 <textarea
                     id="phrases"
