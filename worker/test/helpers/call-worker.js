@@ -12,12 +12,23 @@ const DEFAULT_CORS = {
 
 /**
  * Build a Request-like object the handlers can consume. The handlers
- * only ever call `request.json()`, `request.method`, and
- * `request.headers.get(...)`, so a minimal object is enough.
+ * only ever call `request.json()`, `request.method`, `request.url`,
+ * and `request.headers.get(...)`, so a minimal object is enough.
+ *
+ * `url` defaults to a valid absolute URL so that handlers which
+ * parse it (e.g. for query params like `?limit=`) don't throw
+ * `Invalid URL`. Pass a URL with query string when the handler
+ * needs one.
  */
-export function makeRequest({ method = 'POST', body = null, headers = {} } = {}) {
+export function makeRequest({
+  method = 'POST',
+  body = null,
+  headers = {},
+  url = 'https://test.local/',
+} = {}) {
   return {
     method,
+    url,
     headers: {
       get(name) { return headers[name] || headers[name.toLowerCase()] || null; },
     },

@@ -10,7 +10,9 @@ const isWatch = process.argv.includes("--watch");
 
 const PATHS = {
   entry: path.join(__dirname, "src", "main.js"),
+  adminEntry: path.join(__dirname, "src", "admin", "admin.js"),
   bundle: path.join(__dirname, "public", "app.js"),
+  adminBundle: path.join(__dirname, "public", "admin.js"),
   templates: path.join(__dirname, "templates"),
   public: path.join(__dirname, "public"),
   releases: path.join(__dirname, "public", "releases"),
@@ -23,11 +25,11 @@ const HTML_TEMPLATES = [
   "private-source.html",
 ];
 
-async function bundle() {
-  const options = {
-    entryPoints: [PATHS.entry],
+// Shared options for every bundle. Each bundle overrides `entryPoints`
+// and `outfile`.
+function baseOptions() {
+  return {
     bundle: true,
-    outfile: PATHS.bundle,
     format: "iife",
     platform: "browser",
     target: ["es2020"],
@@ -52,15 +54,48 @@ async function bundle() {
     },
     logLevel: "info",
   };
+}
+
+async function bundle() {
+  const common = baseOptions();
+
+  const appOptions = { ...common, entryPoints: [PATHS.entry], outfile: PATHS.bundle };
+  const adminOptions = { ...common, entryPoints: [PATHS.adminEntry], outfile: PATHS.adminBundle };
 
   if (isWatch) {
-    const ctx = await esbuild.context(options);
-    await ctx.watch();
+    const appCtx = await esbuild.context(appOptions);
+    await appCtx.watch();
+
+    // The admin bundle is optional — if the admin entry hasn't been
+    // created yet, skip it rather than failing the whole watch.
+    try {
+      await fs.access(PATHS.adminEntry);
+      const adminCtx = await esbuild.context(adminOptions);
+      await adminCtx.watch();
+    } catch {
+      console.warn("  src/admin/admin.js not found — skipping admin bundle");
+    }
+
     console.log("Watching for changes...");
     return null;
   }
-  await esbuild.build(options);
-  console.log("  bundle written");
+
+  await esbuild.build(appOptions);
+  console.log("  app.js bundle written");
+
+  // Admin bundle is optional. If it fails to build (e.g. file missing),
+  // warn and continue — the app itself is the primary artifact.
+  try {
+    await fs.access(PATHS.adminEntry);
+    await esbuild.build(adminOptions);
+    console.log("  admin.js bundle written");
+  } catch (e) {
+    if (e.code === "ENOENT") {
+      console.warn("  src/admin/admin.js not found — skipping admin bundle");
+    } else {
+      throw e;
+    }
+  }
 }
 
 async function hashBundle(filePath) {
@@ -111,8 +146,8 @@ async function main() {
   if (result === null) return;
 
   const { sri, sha256, size } = await hashBundle(PATHS.bundle);
-  console.log("  size:   " + (size / 1024).toFixed(1) + " KB");
-  console.log("  sha256: " + sha256.slice(0, 16) + "...");
+  console.log("  app.js size:   " + (size / 1024).toFixed(1) + " KB");
+  console.log("  app.js sha256: " + sha256.slice(0, 16) + "...");
 
   const vars = {
     APP_JS_SRI: sri,

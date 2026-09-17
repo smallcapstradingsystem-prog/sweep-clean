@@ -14,6 +14,9 @@
  *   GET  /fee/pending           — operator view: pending forwards
  *   GET  /fee/summary           — operator view: totals by chain
  *   POST /fee/mark-forwarded    — operator view: mark a sweep forwarded
+ *   POST /admin/credits/grant   — grant credits to a client (operator)
+ *   POST /admin/credits/lookup  — read balance + history for a client (operator)
+ *   GET  /admin/credits/list    — enumerate client balances (operator)
  *   GET  /health                — health check
  *
  * Required secrets:
@@ -26,11 +29,15 @@
  *                              - a 0x-prefixed 64-char hex private key, OR
  *                              - a BIP-39 mnemonic (12/15/18/21/24 words)
  *                              The wallet address is derived at runtime.
- *   OPERATOR_SECRET          — password for /fee/* operator endpoints
+ *   OPERATOR_SECRET          — password for /fee/* and /admin/* endpoints.
+ *                              Must be strong (32+ random bytes) since there
+ *                              is no Cloudflare Access layer in front of the
+ *                              operator dashboard.
  *
  * KV namespaces:
  *   CREDITS             — balances, history, free-claim state, rate limits,
- *                         fee records, sweep commits, idempotency keys
+ *                         fee records, sweep commits, idempotency keys,
+ *                         admin rate limits
  *   PENDING_PAYMENTS    — crypto payment records
  */
 
@@ -168,6 +175,30 @@ const FREE_CLAIM_IP_TTL = 60 * 60 * 24 * 7;
 const SWEEP_COMMIT_TTL = 60 * 60 * 24 * 30;
 
 // =====================================================================
+// ADMIN RATE LIMITING
+// =====================================================================
+//
+// /admin/* endpoints are gated by X-Operator-Secret only (no
+// Cloudflare Access). A brute-force attempt would otherwise be
+// unthrottled. Two caps apply per IP:
+//
+//   - AUTH_FAIL_MAX failed auth attempts per AUTH_FAIL_WINDOW_MS
+//     (attempts with a wrong/missing secret)
+//   - ADMIN_CALL_MAX total admin requests per ADMIN_RATE_WINDOW_MS
+//     (successful or not)
+//
+// Exceeding either returns 429. Successful admin calls still count
+// toward the total cap so a legitimate operator can't be starved by
+// an attacker from the same NAT.
+// =====================================================================
+
+const ADMIN_AUTH_FAIL_MAX = 10;
+const ADMIN_AUTH_FAIL_WINDOW_MS = 15 * 60 * 1000;
+
+const ADMIN_CALL_MAX = 120;
+const ADMIN_RATE_WINDOW_MS = 10 * 60 * 1000;
+
+// =====================================================================
 // SPONSOR WALLET — accepts hex private key OR BIP-39 mnemonic
 // =====================================================================
 //
@@ -250,9 +281,17 @@ export default {
       if (path === '/fee/mark-forwarded'  && request.method === 'POST') return await handleFeeMarkForwarded(request, env, cors);
       if (path === '/fee/summary'         && request.method === 'GET')  return await handleFeeSummary(request, env, cors);
 
+      if (path === '/admin/credits/grant'  && request.method === 'POST') return await handleAdminCreditsGrant(request, env, cors);
+      if (path === '/admin/credits/lookup' && request.method === 'POST') return await handleAdminCreditsLookup(request, env, cors);
+      if (path === '/admin/credits/list'   && request.method === 'GET')  return await handleAdminCreditsList(request, env, cors);
+
       return json({ error: 'not found' }, 404, cors);
     } catch (err) {
       if (err.status === 401) return json({ error: 'unauthorized' }, 401, cors);
+      if (err.status === 429) return json({ error: 'rate limited' }, 429, cors);
+      if (err.status === 500 && err.message.includes('OPERATOR_SECRET')) {
+        return json({ error: 'operator secret not configured' }, 500, cors);
+      }
       const firstFrame = String(err?.stack || '').split('\n')[0];
       console.error('Worker error:', err?.name || 'Error', '—', firstFrame);
       return json({ error: 'internal error' }, 500, cors);
@@ -1181,6 +1220,200 @@ function requireOperator(request, env) {
 }
 
 // =====================================================================
+// ADMIN
+// =====================================================================
+
+async function checkAdminAuthFailRate(env, ip) {
+  const key = `admin:authfail:${ip}`;
+  const raw = await env.CREDITS.get(key);
+  const now = Date.now();
+
+  if (!raw) return { ok: true, count: 0 };
+
+  try {
+    const entry = JSON.parse(raw);
+    if (now > entry.reset) {
+      await env.CREDITS.delete(key).catch(() => {});
+      return { ok: true, count: 0 };
+    }
+    if (entry.count >= ADMIN_AUTH_FAIL_MAX) {
+      return { ok: false, count: entry.count, reset: entry.reset };
+    }
+    return { ok: true, count: entry.count };
+  } catch {
+    return { ok: true, count: 0 };
+  }
+}
+
+async function recordAdminAuthFail(env, ip) {
+  const key = `admin:authfail:${ip}`;
+  const raw = await env.CREDITS.get(key);
+  const now = Date.now();
+
+  let entry;
+  if (!raw) {
+    entry = { count: 1, reset: now + ADMIN_AUTH_FAIL_WINDOW_MS };
+  } else {
+    try {
+      entry = JSON.parse(raw);
+      if (now > entry.reset) {
+        entry = { count: 1, reset: now + ADMIN_AUTH_FAIL_WINDOW_MS };
+      } else {
+        entry.count += 1;
+      }
+    } catch {
+      entry = { count: 1, reset: now + ADMIN_AUTH_FAIL_WINDOW_MS };
+    }
+  }
+
+  await env.CREDITS.put(key, JSON.stringify(entry), {
+    expirationTtl: Math.ceil((entry.reset - now) / 1000) + 1,
+  }).catch(() => {});
+}
+
+async function checkAdminCallRate(env, ip) {
+  const key = `admin:rl:${ip}`;
+  const raw = await env.CREDITS.get(key);
+  const now = Date.now();
+
+  if (!raw) {
+    await env.CREDITS.put(key, JSON.stringify({ count: 1, reset: now + ADMIN_RATE_WINDOW_MS }), {
+      expirationTtl: Math.ceil(ADMIN_RATE_WINDOW_MS / 1000),
+    });
+    return true;
+  }
+
+  try {
+    const entry = JSON.parse(raw);
+    if (now > entry.reset) {
+      await env.CREDITS.put(key, JSON.stringify({ count: 1, reset: now + ADMIN_RATE_WINDOW_MS }), {
+        expirationTtl: Math.ceil(ADMIN_RATE_WINDOW_MS / 1000),
+      });
+      return true;
+    }
+    if (entry.count >= ADMIN_CALL_MAX) return false;
+    entry.count += 1;
+    await env.CREDITS.put(key, JSON.stringify(entry), {
+      expirationTtl: Math.ceil((entry.reset - now) / 1000),
+    });
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+async function requireAdmin(request, env, ip) {
+  const callOk = await checkAdminCallRate(env, ip);
+  if (!callOk) {
+    const err = new Error('rate limited');
+    err.status = 429;
+    throw err;
+  }
+
+  const failCheck = await checkAdminAuthFailRate(env, ip);
+  if (!failCheck.ok) {
+    const err = new Error('too many failed auth attempts');
+    err.status = 429;
+    throw err;
+  }
+
+  const provided = request.headers.get('X-Operator-Secret') || '';
+  const expected = env.OPERATOR_SECRET || '';
+  if (!expected) {
+    const err = new Error('OPERATOR_SECRET not configured');
+    err.status = 500;
+    throw err;
+  }
+  if (provided !== expected) {
+    await recordAdminAuthFail(env, ip);
+    const err = new Error('unauthorized');
+    err.status = 401;
+    throw err;
+  }
+}
+
+export async function handleAdminCreditsGrant(request, env, cors) {
+  const ip = request.headers.get('cf-connecting-ip') || 'unknown';
+  await requireAdmin(request, env, ip);
+
+  const body = await request.json();
+  const { clientId, amount, reason, note } = body || {};
+
+  if (!clientId || typeof clientId !== 'string' || clientId.length < 16) {
+    return json({ error: 'clientId required (min 16 chars)' }, 400, cors);
+  }
+  if (typeof amount !== 'number' || !Number.isInteger(amount) || amount === 0) {
+    return json({ error: 'amount must be a non-zero integer' }, 400, cors);
+  }
+  if (Math.abs(amount) > 100000) {
+    return json({ error: 'amount exceeds sanity cap (100000)' }, 400, cors);
+  }
+
+  const newBalance = await addCredits(env, clientId, amount, {
+    type: 'admin_grant',
+    reason: reason || 'manual',
+    note: note || null,
+    ip,
+  });
+
+  return json({
+    ok: true,
+    clientId,
+    amount,
+    newBalance,
+    grantedAt: new Date().toISOString(),
+  }, 200, cors);
+}
+
+export async function handleAdminCreditsLookup(request, env, cors) {
+  const ip = request.headers.get('cf-connecting-ip') || 'unknown';
+  await requireAdmin(request, env, ip);
+
+  const body = await request.json();
+  const { clientId } = body || {};
+
+  if (!clientId || typeof clientId !== 'string') {
+    return json({ error: 'clientId required' }, 400, cors);
+  }
+
+  const balance = await getBalance(env, clientId);
+  const historyRaw = await env.CREDITS.get(`history:${clientId}`);
+  let history = [];
+  try { history = historyRaw ? JSON.parse(historyRaw) : []; } catch { history = []; }
+
+  return json({ ok: true, clientId, balance, history }, 200, cors);
+}
+
+export async function handleAdminCreditsList(request, env, cors) {
+  const ip = request.headers.get('cf-connecting-ip') || 'unknown';
+  await requireAdmin(request, env, ip);
+
+  const url = new URL(request.url);
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
+
+  // list() returns keys under the given prefix. The balance:<id>
+  // keys are what we want. Results are paginated but for a first
+  // pass we cap at `limit` entries.
+  const listed = await env.CREDITS.list({ prefix: 'balance:', limit });
+
+  const items = [];
+  for (const key of listed.keys) {
+    const clientId = key.name.slice('balance:'.length);
+    const raw = await env.CREDITS.get(key.name);
+    const balance = raw ? parseInt(raw, 10) : 0;
+    items.push({ clientId, balance });
+  }
+
+  return json({
+    ok: true,
+    count: items.length,
+    cursor: listed.cursor || null,
+    list_complete: listed.list_complete ?? true,
+    items,
+  }, 200, cors);
+}
+
+// =====================================================================
 // HELPERS
 // =====================================================================
 
@@ -1190,6 +1423,7 @@ export function json(data, status = 200, cors = { 'Access-Control-Allow-Origin':
     headers: { 'Content-Type': 'application/json', ...cors },
   });
 }
+
 export {
   BUNDLES,
   CHAIN_IDS,
@@ -1207,4 +1441,8 @@ export {
   FREE_CLAIM_WINDOW_MS,
   FREE_CLAIM_IP_MAX,
   SWEEP_COMMIT_TTL,
+  ADMIN_AUTH_FAIL_MAX,
+  ADMIN_AUTH_FAIL_WINDOW_MS,
+  ADMIN_CALL_MAX,
+  ADMIN_RATE_WINDOW_MS,
 };
