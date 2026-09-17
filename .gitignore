@@ -1,0 +1,11 @@
+node_modules/
+public/app.js
+public/app.js.map
+public/app.html
+public/index.html
+public/checkout-complete.html
+public/releases/
+.env
+.env.local
+.wrangler/
+*.log

@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Why the source is private — Sweeper</title>
+    <meta name="description" content="Why Sweeper's source code is not public, and how we compensate for the loss of auditability.">
+    <link rel="icon" href="/favicon.ico">
+    <link rel="stylesheet" href="marketing.css">
+</head>
+<body>
+    <nav class="nav">
+        <div class="wrap">
+            <a href="/" class="logo">◈ Sweeper</a>
+            <div class="nav-links">
+                <a href="/">Home</a>
+                <a href="/guide.html">Guide</a>
+                <a href="/security-policy.html">Security</a>
+                <a href="/app.html" class="btn btn-primary btn-sm">Launch App</a>
+            </div>
+        </div>
+    </nav>
+
+    <main class="wrap" style="max-width: 760px; padding-top: 60px; padding-bottom: 80px;">
+
+        <h1 style="margin-bottom: 12px;">Why the source is private</h1>
+        <p class="lede" style="margin-bottom: 40px;">
+            We know this is a trade-off. Here's our reasoning, and how we compensate for it.
+        </p>
+
+        <section style="margin-bottom: 48px;">
+            <h2>The short version</h2>
+            <p>
+                Sweeper's source code is not public. This is a deliberate choice, not an oversight.
+                We recognize that it removes a common way for users to verify what they're running.
+                This page explains why we made the choice, what we're doing to compensate, and what
+                you can still verify yourself.
+            </p>
+        </section>
+
+        <section style="margin-bottom: 48px;">
+            <h2>Why we're not publishing the source</h2>
+
+            <p><strong>1. The fee and routing logic is the product.</strong></p>
+            <p>
+                The interesting engineering in Sweeper is not "call a DEX." It's the specific routing
+                decisions across six EVM chains, Solana, and Bitcoin — which swap path to take, when to
+                skip a token, how to handle dust, how fee collection is structured. That logic took real
+                work to get right. Publishing it hands competitors a free blueprint, and there are
+                already a handful of copycat products in this space.
+            </p>
+
+            <p><strong>2. Frontend bundles are trivially decompiled.</strong></p>
+            <p>
+                Even if we wanted to obfuscate only the "secret sauce," our app is a client-side bundle.
+                Anyone can load it, prettify it, and read the minified source in about five minutes. The
+                only way to keep the routing logic proprietary is to keep it out of a public repo entirely.
+            </p>
+
+            <p><strong>3. We're a small team, and publishing is a commitment.</strong></p>
+            <p>
+                Open-sourcing is not just "push to GitHub." It means triaging issues from strangers,
+                reviewing pull requests, responding to security reports, and maintaining a public
+                changelog forever. We'd rather focus that energy on shipping the product and supporting
+                paying users. If we open-source later, we want to do it properly, not performatively.
+            </p>
+        </section>
+
+        <section style="margin-bottom: 48px;">
+            <h2>What this means for you</h2>
+
+            <p>
+                We are honest about what you lose by not having public source. You lose:
+            </p>
+
+            <ul>
+                <li><strong>The ability to read the code yourself</strong> before trusting it with a mnemonic</li>
+                <li><strong>The ability to fork it</strong> and run your own version</li>
+                <li><strong>The ability to verify</strong> that no hidden behavior was added in a release</li>
+                <li><strong>The ability to contribute fixes</strong> directly</li>
+            </ul>
+
+            <p>
+                Those are real losses. If any of them are non-negotiable for you, don't use Sweeper.
+                That's a fair decision, and we respect it.
+            </p>
+        </section>
+
+        <section style="margin-bottom: 48px;">
+            <h2>What you can still verify</h2>
+
+            <p><strong>1. Nothing leaves your browser.</strong></p>
+            <p>
+                This is the most important claim, and you don't need source code to check it. Open
+                DevTools → Network. Paste a mnemonic. Run Preview. Run a dry sweep. Watch every
+                network request. No request contains any part of your phrase, any derived private
+                key, or any signed transaction data beyond what's broadcast on-chain.
+            </p>
+
+            <p><strong>2. The bundle you're running matches what we published.</strong></p>
+            <p>
+                Every release publishes a SHA-256 hash and a Subresource Integrity (SRI) hash at
+                <a href="/releases/latest.txt"><code>/releases/latest.txt</code></a>. The HTML loads
+                <code>app.js</code> with that SRI hash pinned — if the file on our server ever changes,
+                your browser refuses to load it. You can verify the hash yourself:
+            </p>
+            <pre style="background: rgba(255,255,255,0.03); padding: 16px; border-radius: 6px; overflow-x: auto; font-size: 13px;"><code>curl -s https://sweeper.cloud/app.js | openssl dgst -sha256</code></pre>
+            <p>
+                The output should match the <code>sha256_hex</code> in <code>latest.txt</code>. If it
+                doesn't, something is wrong and you should not use the app.
+            </p>
+
+            <p><strong>3. Every signature is yours, on your device.</strong></p>
+            <p>
+                If you're using a hardware wallet (Ledger or Trezor), you see every transaction on the
+                device screen before you approve it. If you're using a mnemonic, you can verify the
+                resulting on-chain transactions on any block explorer afterward. No server has the
+                ability to sign on your behalf, because no server ever sees your keys.
+            </p>
+
+            <p><strong>4. The on-chain footprint is public.</strong></p>
+            <p>
+                Every token approval, every swap, every transfer shows up on the blockchain. If the
+                app ever did something unexpected, it would leave a permanent, public trace. You can
+                check any address you've swept against Etherscan, Solscan, mempool.space, or any other
+                explorer at any time.
+            </p>
+        </section>
+
+        <section style="margin-bottom: 48px;">
+            <h2>What we will never do</h2>
+
+            <p>
+                Even without source code, we can commit to certain invariants — and these commitments
+                are enforceable in ways that are more meaningful than source review:
+            </p>
+
+            <ul>
+                <li><strong>We will never transmit your mnemonic, seed, or private keys.</strong> If we did, you would see it in DevTools → Network instantly. This is checkable.</li>
+                <li><strong>We will never sign transactions on your behalf.</strong> We can't — we don't have the keys. This is architectural.</li>
+                <li><strong>We will never take custody of your funds.</strong> The only addresses we control are our fee wallets, and their activity is public on-chain.</li>
+                <li><strong>We will never add telemetry that includes wallet contents or addresses.</strong> Currently Sentry and Plausible are disabled; if enabled, all payloads are scrubbed of addresses and hashes before transmission.</li>
+                <li><strong>We will publish the SHA-256 of every release</strong> and pin the SRI hash in the HTML, so users can detect any tampering after the fact.</li>
+            </ul>
+        </section>
+
+        <section style="margin-bottom: 48px;">
+            <h2>If you need source access</h2>
+
+            <p>
+                For security researchers, enterprise users, or anyone with a specific need to review
+                the code:
+            </p>
+            <p>
+                We can grant read access to the private repository under a standard mutual NDA. Reach
+                out at <a href="mailto:security@sweeper.cloud">security@sweeper.cloud</a> with a brief
+                description of who you are and what you need to review. We've granted access to
+                independent researchers before and are happy to do so again.
+            </p>
+        </section>
+
+        <section style="margin-bottom: 48px;">
+            <h2>The honest summary</h2>
+
+            <p>
+                If our reasoning sounds like "we want to protect our business," that's because it is.
+                We're not claiming security through obscurity makes the app safer — it doesn't. We're
+                claiming that publishing the source would cost us more than it costs our users, given
+                that the app's trust properties can be verified independently without it.
+            </p>
+
+            <p>
+                If you disagree with that trade-off, don't use the app. If you want source access for
+                a legitimate reason, ask. We're not trying to be secretive for its own sake.
+            </p>
+        </section>
+
+        <div style="border-top: 1px solid rgba(255,255,255,0.08); padding-top: 32px; margin-top: 48px;">
+            <p style="color: #8b949e; font-size: 14px;">
+                Questions or disagreement? Email
+                <a href="mailto:security@sweeper.cloud">security@sweeper.cloud</a>.
+            </p>
+        </div>
+
+    </main>
+
+    <footer class="footer">
+        <div class="wrap">
+            <div class="footer-bottom">
+                <p>© 2026 Sweeper Labs. <a href="/">Home</a> · <a href="/guide.html">Guide</a> · <a href="/terms.html">Terms</a> · <a href="/privacy.html">Privacy</a> · <a href="/security-policy.html">Security</a></p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>

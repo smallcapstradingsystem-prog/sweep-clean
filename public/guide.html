@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Guide — How to use Sweeper</title>
+    <meta name="description" content="Step-by-step guide to using Sweeper: pick a wallet source, preview balances, buy a credit, and sweep your wallets into USDC.">
+    <meta name="theme-color" content="#0a0e1a">
+    <link rel="icon" href="/favicon.ico">
+    <link rel="stylesheet" href="marketing.css">
+    <style>
+        .guide {
+            max-width: 780px;
+            margin: 0 auto;
+            padding: 60px 24px 80px;
+        }
+        .guide h1 {
+            font-size: 42px;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            margin-bottom: 12px;
+        }
+        .guide .subtitle {
+            color: var(--muted);
+            font-size: 18px;
+            margin-bottom: 48px;
+        }
+        .guide h2 {
+            font-size: 26px;
+            font-weight: 700;
+            text-align: left;
+            margin: 56px 0 12px;
+            letter-spacing: -0.01em;
+        }
+        .guide h3 {
+            font-size: 18px;
+            font-weight: 600;
+            margin: 32px 0 8px;
+            color: var(--text);
+        }
+        .guide p, .guide li {
+            color: var(--muted);
+            font-size: 16px;
+            line-height: 1.75;
+        }
+        .guide p { margin-bottom: 16px; }
+        .guide ul, .guide ol {
+            padding-left: 24px;
+            margin-bottom: 20px;
+        }
+        .guide li { margin-bottom: 8px; }
+        .guide strong { color: var(--text); }
+        .guide a { color: var(--accent); }
+
+        .guide code {
+            background: #161b22;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: ui-monospace, monospace;
+            font-size: 14px;
+            color: #79c0ff;
+        }
+
+        .guide-callout {
+            background: rgba(88, 166, 255, 0.08);
+            border-left: 3px solid var(--accent);
+            padding: 16px 20px;
+            border-radius: 4px;
+            margin: 20px 0;
+            font-size: 15px;
+            color: var(--muted);
+        }
+        .guide-callout strong { color: var(--text); }
+
+        .guide-warn {
+            background: rgba(187, 128, 9, 0.1);
+            border-left: 3px solid #bb8009;
+            padding: 16px 20px;
+            border-radius: 4px;
+            margin: 20px 0;
+            font-size: 15px;
+            color: #e3b341;
+        }
+        .guide-warn strong { color: #f0c674; }
+
+        .toc {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 20px 24px;
+            margin-bottom: 40px;
+        }
+        .toc h4 {
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--muted);
+            margin-bottom: 12px;
+        }
+        .toc ol {
+            padding-left: 20px;
+            margin: 0;
+        }
+        .toc li {
+            margin-bottom: 6px;
+            font-size: 15px;
+        }
+        .toc a {
+            color: var(--text);
+            text-decoration: none;
+        }
+        .toc a:hover {
+            color: var(--accent);
+            text-decoration: underline;
+        }
+
+        .back-link {
+            display: inline-block;
+            margin-bottom: 24px;
+            color: var(--muted);
+            font-size: 14px;
+        }
+        .back-link:hover { color: var(--text); text-decoration: none; }
+
+        @media (max-width: 640px) {
+            .guide h1 { font-size: 30px; }
+            .guide h2 { font-size: 22px; }
+            .guide { padding: 40px 20px 60px; }
+        }
+    </style>
+</head>
+<body>
+    <nav class="nav">
+        <div class="wrap">
+            <a href="/" class="logo">◈ Sweeper</a>
+            <div class="nav-links">
+                <a href="/">Home</a>
+                <a href="/guide.html">Guide</a>
+                <a href="/app.html" class="btn btn-primary btn-sm">Launch App</a>
+            </div>
+        </div>
+    </nav>
+
+    <main class="guide">
+        <a href="/app.html" class="back-link">← Back to app</a>
+
+        <h1>How to use Sweeper</h1>
+        <p class="subtitle">
+            A complete walkthrough — from picking a wallet source to receiving USDC at your destination.
+        </p>
+
+        <div class="toc">
+            <h4>On this page</h4>
+            <ol>
+                <li><a href="#overview">Overview</a></li>
+                <li><a href="#wallet-source">Choosing a wallet source</a></li>
+                <li><a href="#destination">Setting a destination</a></li>
+                <li><a href="#chains">Selecting chains and families</a></li>
+                <li><a href="#preview">Running a preview</a></li>
+                <li><a href="#credit">Buying a credit</a></li>
+                <li><a href="#live">Running a live sweep</a></li>
+                <li><a href="#troubleshooting">Troubleshooting</a></li>
+                <li><a href="#safety">Safety notes</a></li>
+            </ol>
+        </div>
+
+        <h2 id="overview">1. Overview</h2>
+        <p>
+            Sweeper finds every token in your wallets across multiple chains, swaps them
+            all into USDC, and sends the USDC to a destination address you choose. It runs
+            entirely in your browser — your keys never leave your device.
+        </p>
+        <p>The workflow has three stages:</p>
+        <ol>
+            <li><strong>Preview</strong> — the app derives your wallet addresses and shows you what's in each one. Nothing is signed, nothing is broadcast. Free, unlimited.</li>
+            <li><strong>Buy a credit</strong> — one credit = one live sweep. You pay in crypto (USDC, ETH, SOL, or BTC). Credits never expire.</li>
+            <li><strong>Execute</strong> — the app swaps every token to USDC and sends the USDC to the destination address you chose. Every transaction is signed locally.</li>
+        </ol>
+
+        <div class="guide-callout">
+            <strong>Tip:</strong> Always run a preview first. It takes a few seconds and tells you
+            exactly what the app will do — before you commit a credit.
+        </div>
+
+        <h2 id="wallet-source">2. Choosing a wallet source</h2>
+        <p>Sweeper supports five wallet sources. Pick whichever matches how you hold your keys.</p>
+
+        <h3>Browser extension (recommended for desktop)</h3>
+        <p>
+            Connect your installed MetaMask, Rabby, Coinbase Wallet, Brave Wallet, or
+            any EIP-1193 wallet extension. You sign each transaction in the extension popup.
+        </p>
+        <ul>
+            <li><strong>Best for:</strong> users with a browser wallet already installed</li>
+            <li><strong>Chains:</strong> EVM only (Ethereum, Arbitrum, Optimism, Base, Polygon, BNB)</li>
+            <li><strong>Note:</strong> MetaMask, Rabby, and Coinbase Wallet handle multi-chain switching
+                reliably. Phantom and some others only support one chain at a time.</li>
+        </ul>
+
+        <h3>WalletConnect QR code</h3>
+        <p>
+            Scan a QR with your phone's wallet app. Works with MetaMask Mobile, Rainbow,
+            Trust Wallet, and most modern mobile wallets.
+        </p>
+        <ul>
+            <li><strong>Best for:</strong> users who hold keys on a phone</li>
+            <li><strong>Chains:</strong> EVM only</li>
+            <li><strong>Note:</strong> you approve each transaction on your phone</li>
+        </ul>
+
+        <h3>Paste mnemonic(s)</h3>
+        <p>
+            Paste one BIP-39 seed phrase per line. The app derives EVM, Solana, and
+            Bitcoin keys from each phrase. This is the only method that supports all
+            three families.
+        </p>
+        <ul>
+            <li><strong>Best for:</strong> sweeping wallets across EVM + Solana + Bitcoin, or when you don't want to sign dozens of popups</li>
+            <li><strong>Chains:</strong> everything</li>
+            <li><strong>Security:</strong> the phrases never leave your browser. Verify with DevTools → Network before entering anything.</li>
+        </ul>
+
+        <h3>Ledger (WebHID)</h3>
+        <p>
+            Connect your Ledger, open the Ethereum app, and click Connect. You sign
+            each transaction on the device. Requires Chrome or Edge.
+        </p>
+
+        <h3>Trezor</h3>
+        <p>
+            Connect your Trezor and approve the connection in the Trezor popup.
+        </p>
+
+        <div class="guide-warn">
+            <strong>Hardware wallets (Ledger, Trezor) support EVM chains only.</strong>
+            Solana and Bitcoin sweeping require a mnemonic.
+        </div>
+
+        <h2 id="destination">3. Setting a destination</h2>
+        <p>
+            The destination is where the USDC lands after the sweep. It's the <em>only</em>
+            address that matters for output, and it's a wallet you choose.
+        </p>
+        <ul>
+            <li>Use an address you control</li>
+            <li>Use a <strong>different</strong> address than the wallets you're sweeping — the sweep wallets get emptied</li>
+            <li>For hardware wallets or exchange deposits, paste the address directly</li>
+        </ul>
+        <div class="guide-warn">
+            <strong>Double-check every character.</strong> A single wrong digit sends your USDC
+            to a stranger's wallet. There is no undo.
+        </div>
+
+        <h2 id="chains">4. Selecting chains and families</h2>
+        <p>Three families are supported:</p>
+        <ul>
+            <li><strong>EVM</strong> — Ethereum, Arbitrum, Optimism, Base, Polygon, BNB Chain</li>
+            <li><strong>Solana</strong> — Solana mainnet</li>
+            <li><strong>Bitcoin</strong> — Bitcoin mainnet</li>
+        </ul>
+        <p>
+            Check only the chains you want to sweep. Fewer chains = faster preview and
+            fewer transactions. Uncheck everything except one chain for a focused test.
+        </p>
+
+        <h2 id="preview">5. Running a preview</h2>
+        <p>Click <strong>Preview</strong>. The app will:</p>
+        <ol>
+            <li>Derive addresses from each mnemonic (or read the connected wallet's address)</li>
+            <li>Query balances for every chain you selected</li>
+            <li>Discover every token with a non-zero balance</li>
+            <li>Report what it found in the output log</li>
+        </ol>
+        <p>
+            Nothing is signed. Nothing is broadcast. Preview is completely free and you
+            can run it as many times as you want.
+        </p>
+        <p>What you'll see in the log:</p>
+        <ul>
+            <li><code>native: X ETH</code> — the wallet's native token balance</li>
+            <li><code>USDC: X</code> — stablecoin balance (already USDC, no swap needed)</li>
+            <li><code>PEPE: X</code> — any other token found via auto-discovery</li>
+        </ul>
+        <div class="guide-callout">
+            <strong>About spam tokens:</strong> most wallets accumulate scam airdrops
+            ("Visit XYZ.com to claim..."). The app finds them, but they'll be skipped
+            during the sweep because they have no liquidity. They stay in the wallet
+            untouched — that's correct behavior.
+        </div>
+
+        <h2 id="credit">6. Buying a credit</h2>
+        <p>
+            One credit = one live sweep, regardless of how many wallets or chains you
+            include. Prices:
+        </p>
+        <ul>
+            <li>1 credit — $10</li>
+            <li>5 credits — $20</li>
+            <li>10 credits — $40</li>
+            <li>25 credits — $80</li>
+            <li>50 credits — $150</li>
+        </ul>
+        <p>To buy:</p>
+        <ol>
+            <li>Click <strong>Buy credits</strong> in the top nav</li>
+            <li>Pick a bundle</li>
+            <li>Pick a payment method: USDC on Base (cheapest), USDC on Ethereum, ETH on Base, SOL, or BTC</li>
+            <li>Send the exact amount shown to the address shown</li>
+            <li>The app polls for confirmation and credits your account automatically</li>
+        </ol>
+        <div class="guide-callout">
+            <strong>Pay attention to the amount.</strong> Each payment has a unique
+            fractional amount (like <code>5.00123</code> USDC) so the app can identify
+            it. Send the exact number — rounding may cause the payment to not be
+            detected.
+        </div>
+
+        <h2 id="live">7. Running a live sweep</h2>
+        <p>Once you have credits, switch to <strong>Live</strong> mode and click <strong>Run</strong>.</p>
+        <p>You'll be asked to type <code>LIVE_SWEEP_NOW</code> as a final confirmation.</p>
+        <p>What happens next:</p>
+        <ol>
+            <li>One credit is consumed</li>
+            <li>For each wallet and chain, the app:
+                <ul>
+                    <li>Transfers any existing USDC to the destination you chose</li>
+                    <li>Approves the Uniswap router to spend each token (one-time per token)</li>
+                    <li>Simulates the swap to verify it will succeed</li>
+                    <li>Executes the swap, sending USDC directly to the destination you chose</li>
+                </ul>
+            </li>
+            <li>Native tokens (ETH/BNB/POL) are wrapped and swapped, with a reserve kept back for gas</li>
+            <li>Once all chains finish, the sweep is complete</li>
+        </ol>
+        <p>The log shows one line per token:</p>
+        <ul>
+            <li><code>SUCCESS 0x...</code> — swapped, USDC sent to destination</li>
+            <li><code>SKIPPED (...)</code> — deliberately skipped (dust, restricted token, etc.)</li>
+            <li><code>NO_ROUTE</code> — no Uniswap pool for this token</li>
+            <li><code>ERROR (...)</code> — something went wrong, see the reason</li>
+        </ul>
+
+        <h2 id="troubleshooting">8. Troubleshooting</h2>
+
+        <h3>"No credits available"</h3>
+        <p>
+            You need a credit to run a live sweep. Preview and dry runs are free —
+            only live sweeps consume credits.
+        </p>
+
+        <h3>"The Provider is not connected to the requested chain"</h3>
+        <p>
+            Your browser wallet is on a different chain than the app is trying to use.
+            MetaMask, Rabby, and Coinbase Wallet switch automatically. Phantom and some
+            others don't support multi-chain switching — use the mnemonic method, or
+            use a different wallet.
+        </p>
+
+        <h3>"USDC transfer: insufficient gas"</h3>
+        <p>
+            The wallet doesn't have enough native token (ETH, BNB, POL) to pay for the
+            transaction. Send a small amount to the sweep wallet and try again.
+        </p>
+
+        <h3>Token shows as "no route" or "skipped"</h3>
+        <p>
+            Either the token has no Uniswap pool (spam airdrops usually don't), or its
+            value is below the $0.50 minimum to bother swapping. Either way, the token
+            stays in the wallet untouched.
+        </p>
+
+        <h3>Payment not detected</h3>
+        <p>
+            Wait 60-90 seconds. Blockchain confirmation takes time, and the payment
+            scanner checks for the exact amount you were quoted. If it's been more than
+            5 minutes, verify the amount you sent matches what was shown.
+        </p>
+
+        <h2 id="safety">9. Safety notes</h2>
+        <ul>
+            <li>
+                <strong>Verify your destination address.</strong> Type it, paste it, then
+                read it back character by character. Never trust your eyes at a glance.
+            </li>
+            <li>
+                <strong>Run a dry run first.</strong> It's free and takes seconds. It
+                shows you exactly what the live sweep will do.
+            </li>
+            <li>
+                <strong>Keep enough native gas.</strong> Every sweep wallet needs ETH,
+                BNB, or POL to pay for transactions.
+            </li>
+            <li>
+                <strong>Use a clean browser profile.</strong> Malicious browser extensions
+                can read page content. Use a profile without extensions if you're entering
+                a mnemonic.
+            </li>
+            <li>
+                <strong>Verify the mnemonic never leaves your browser.</strong> Open
+                DevTools → Network tab. Paste a test mnemonic. Search every request
+                body for a word from the phrase. You won't find one.
+            </li>
+            <li>
+                <strong>Back up your destination address.</strong> Once USDC lands, you're
+                responsible for it.
+            </li>
+        </ul>
+
+        <div class="guide-callout">
+            <strong>Need more help?</strong> The FAQ on the <a href="/">home page</a> covers
+            additional questions. For anything else, the source is on
+            <a href="https://github.com/smallcapstradingsystem-prog/sweep-app">GitHub</a>.
+        </div>
+
+        <p style="margin-top: 60px; text-align: center;">
+            <a href="/app.html" class="btn btn-primary btn-lg">Launch App →</a>
+        </p>
+    </main>
+
+    <footer class="footer">
+        <div class="wrap">
+            <div class="footer-grid">
+                <div>
+                    <div class="logo">◈ Sweeper</div>
+                    <p class="footer-tag">Non-custodial wallet consolidation.</p>
+                </div>
+                <div>
+                    <h4>Product</h4>
+                    <ul>
+                        <li><a href="/app.html">Launch App</a></li>
+                        <li><a href="/guide.html">Guide</a></li>
+                        <li><a href="/#pricing">Pricing</a></li>
+                    </ul>
+                </div>
+                <div>
+                    <h4>Security</h4>
+                    <ul>
+                        <li><a href="/security-policy.html">Security model</a></li>
+                        <li><a href="https://github.com/smallcapstradingsystem-prog/sweep-app">Source</a></li>
+                    </ul>
+                </div>
+                <div>
+                    <h4>Legal</h4>
+                    <ul>
+                        <li><a href="/terms.html">Terms of Service</a></li>
+                        <li><a href="/privacy.html">Privacy Policy</a></li>
+                        <li><a href="/security-policy.html">Security Policy</a></li>
+                    </ul>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <p>© 2026 Sweeper Labs. MIT licensed. Provided as-is, no warranty.</p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>

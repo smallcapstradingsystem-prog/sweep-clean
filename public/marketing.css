@@ -1,0 +1,437 @@
+/* =====================================================================
+   SWEEPER — MARKETING STYLES
+   ===================================================================== */
+
+:root {
+    --bg: #0a0e1a;
+    --bg-card: #0d1117;
+    --border: #1f2937;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --primary: #238636;
+    --primary-hover: #2ea043;
+    --danger: #da3633;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+}
+
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ---------- NAV ---------- */
+.nav {
+    padding: 16px 0;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: rgba(10, 14, 26, 0.85);
+    backdrop-filter: blur(12px);
+    z-index: 100;
+}
+.nav .wrap { display: flex; justify-content: space-between; align-items: center; }
+.logo { font-weight: 700; font-size: 20px; color: var(--text); }
+.logo:hover { text-decoration: none; }
+.nav-links { display: flex; gap: 24px; align-items: center; font-size: 14px; }
+.nav-links a { color: var(--muted); }
+.nav-links a:hover { color: var(--text); text-decoration: none; }
+
+/* ---------- BUTTONS ---------- */
+.btn {
+    display: inline-block;
+    padding: 10px 20px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: all 0.15s;
+    text-align: center;
+    font-family: inherit;
+}
+.btn:hover { text-decoration: none; }
+.btn-sm { padding: 6px 14px; font-size: 13px; }
+.btn-lg { padding: 14px 28px; font-size: 16px; }
+.btn-block { display: block; width: 100%; white-space: nowrap; }
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-hover); }
+.btn-secondary { background: transparent; color: var(--text); border-color: #30363d; }
+.btn-secondary:hover { border-color: var(--muted); }
+
+/* ---------- HERO ---------- */
+.hero { padding: 100px 0 80px; text-align: center; }
+.hero h1 {
+    font-size: 56px;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1.1;
+    margin-bottom: 24px;
+}
+.hero h1 .muted { color: var(--muted); }
+.lede {
+    font-size: 19px;
+    color: var(--muted);
+    max-width: 640px;
+    margin: 0 auto 40px;
+    line-height: 1.7;
+}
+.lede strong { color: var(--text); }
+.cta-row {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-bottom: 40px;
+}
+.trust-row {
+    display: flex;
+    gap: 24px;
+    justify-content: center;
+    flex-wrap: wrap;
+    font-size: 13px;
+    color: var(--muted);
+}
+
+/* ---------- SECTIONS ---------- */
+section { padding: 80px 0; }
+section h2 {
+    font-size: 36px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 16px;
+    text-align: center;
+}
+section .lede { text-align: center; margin-bottom: 60px; }
+
+/* ---------- PROBLEM ---------- */
+.problem {
+    background: var(--bg-card);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+}
+
+.problem .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 60px;
+    margin-top: 40px;
+}
+
+/* Paragraph text in the problem section */
+.problem p {
+    margin-bottom: 16px;
+    color: var(--muted);
+}
+
+/* Bold headings inside the problem section render white and heavy.
+   The `.problem p strong` selector has higher specificity than
+   `.problem p`, so these headings always render bold white. */
+.problem p strong,
+.problem p > strong {
+    color: var(--text);
+    font-weight: 700;
+}
+
+.problem ul {
+    list-style: none;
+    padding-left: 0;
+    margin-bottom: 16px;
+}
+
+.problem li {
+    padding: 8px 0 8px 24px;
+    position: relative;
+    color: var(--muted);
+}
+
+.problem li:before {
+    content: "→";
+    position: absolute;
+    left: 0;
+    color: var(--accent);
+}
+
+/* ---------- PROBLEM EXTRA BLOCKS ---------- */
+.problem-extra {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 40px;
+    margin-top: 48px;
+    padding-top: 40px;
+    border-top: 1px solid var(--border);
+}
+
+.problem-extra-block p {
+    margin-bottom: 12px;
+    color: var(--muted);
+    font-size: 15px;
+}
+
+/* Same treatment for the two lower headings */
+.problem-extra-block p strong,
+.problem-extra-block p > strong {
+    color: var(--text);
+    font-weight: 700;
+}
+
+.problem-extra-block ul {
+    list-style: none;
+    padding-left: 0;
+    margin: 0;
+}
+
+.problem-extra-block li {
+    padding: 6px 0 6px 24px;
+    position: relative;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+.problem-extra-block li:before {
+    content: "✓";
+    position: absolute;
+    left: 0;
+    color: var(--primary);
+}
+
+/* ---------- HOW ---------- */
+.steps {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 24px;
+    margin-top: 40px;
+}
+
+.step {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 28px 22px;
+}
+
+.step-num {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--primary);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 14px;
+    margin-bottom: 16px;
+}
+
+.step h3 {
+    font-size: 16px;
+    margin-bottom: 8px;
+    color: var(--text);
+    text-transform: none;
+    letter-spacing: 0;
+}
+
+.step p { color: var(--muted); font-size: 14px; }
+
+/* ---------- PRICING ---------- */
+.pricing-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 24px;
+    margin-top: 40px;
+}
+
+.pricing-grid-3 {
+    grid-template-columns: repeat(3, 1fr);
+    margin-top: 40px;
+}
+
+.pricing-grid-3 + .pricing-grid-3 {
+    margin-top: 24px;
+}
+
+.pricing-grid-secondary {
+    grid-template-columns: repeat(2, 1fr);
+    margin-top: 24px;
+    max-width: 720px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+.price-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 32px 28px;
+    position: relative;
+}
+
+.price-card.featured {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 1px var(--primary);
+}
+
+.badge {
+    position: absolute;
+    top: -12px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--primary);
+    color: #fff;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.price-card h3 {
+    font-size: 20px;
+    margin-bottom: 12px;
+    color: var(--text);
+    text-transform: none;
+    letter-spacing: 0;
+}
+
+.price {
+    font-size: 40px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 4px;
+}
+
+.price span { font-size: 16px; font-weight: 400; color: var(--muted); }
+.price-sub { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+.price-card ul { list-style: none; padding: 0; margin-bottom: 24px; }
+.price-card li {
+    padding: 8px 0 8px 24px;
+    position: relative;
+    font-size: 14px;
+    color: var(--muted);
+}
+.price-card li:before {
+    content: "✓";
+    position: absolute;
+    left: 0;
+    color: var(--primary);
+}
+.pricing-note {
+    text-align: center;
+    color: var(--muted);
+    font-size: 14px;
+    margin-top: 40px;
+}
+
+/* ---------- FAQ ---------- */
+.faq details {
+    border-bottom: 1px solid var(--border);
+    padding: 20px 0;
+}
+
+.faq summary {
+    cursor: pointer;
+    font-weight: 500;
+    font-size: 16px;
+    list-style: none;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.faq summary::-webkit-details-marker { display: none; }
+
+.faq summary:after {
+    content: "+";
+    font-size: 24px;
+    color: var(--muted);
+    transition: transform 0.2s;
+}
+
+.faq details[open] summary:after { transform: rotate(45deg); }
+
+.faq details p {
+    margin-top: 16px;
+    color: var(--muted);
+    font-size: 15px;
+    max-width: 720px;
+}
+
+/* ---------- FINAL CTA ---------- */
+.final-cta {
+    text-align: center;
+    background: var(--bg-card);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+}
+
+.final-cta h2 { margin-bottom: 32px; }
+.final-cta .hint { color: var(--muted); font-size: 14px; margin-top: 16px; }
+
+/* ---------- FOOTER ---------- */
+.footer { padding: 60px 0 40px; font-size: 14px; }
+
+.footer-grid {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr 1fr;
+    gap: 40px;
+    margin-bottom: 40px;
+}
+
+.footer-tag { color: var(--muted); margin-top: 8px; font-size: 13px; }
+.footer h4 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin-bottom: 12px;
+}
+.footer ul { list-style: none; padding: 0; }
+.footer li { margin-bottom: 8px; }
+.footer a { color: var(--text); font-size: 14px; }
+.footer a:hover { color: var(--accent); }
+.footer-bottom {
+    border-top: 1px solid var(--border);
+    padding-top: 24px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+}
+
+/* ---------- RESPONSIVE ---------- */
+@media (max-width: 900px) {
+    .pricing-grid-3 {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (max-width: 768px) {
+    .hero h1 { font-size: 36px; }
+    .lede { font-size: 17px; }
+    .problem .two-col { grid-template-columns: 1fr; gap: 40px; }
+    .problem-extra { grid-template-columns: 1fr; gap: 32px; }
+    .steps { grid-template-columns: 1fr; }
+    .pricing-grid { grid-template-columns: 1fr; }
+    .footer-grid { grid-template-columns: 1fr 1fr; }
+    .nav-links a:not(.btn) { display: none; }
+    section { padding: 60px 0; }
+    section h2 { font-size: 28px; }
+}
+
+@media (max-width: 640px) {
+    .pricing-grid-3 {
+        grid-template-columns: 1fr;
+    }
+    .pricing-grid-secondary {
+        grid-template-columns: 1fr;
+    }
+}

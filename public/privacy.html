@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Privacy Policy — Sweeper</title>
+    <link rel="stylesheet" href="marketing.css">
+    <style>
+        .legal { padding: 60px 0; max-width: 720px; margin: 0 auto; }
+        .legal h1 { margin-bottom: 8px; }
+        .legal .updated { color: #8b949e; font-size: 14px; margin-bottom: 40px; }
+        .legal h2 { font-size: 22px; text-align: left; margin: 40px 0 12px; }
+        .legal h3 { font-size: 16px; margin: 24px 0 8px; }
+        .legal p, .legal li { color: #c9d1d9; font-size: 15px; margin-bottom: 12px; }
+        .legal ul { padding-left: 24px; margin-bottom: 16px; }
+        .legal strong { color: #e6edf3; }
+        .legal table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0 24px;
+        }
+        .legal th, .legal td {
+            border: 1px solid #30363d;
+            padding: 10px 12px;
+            text-align: left;
+            font-size: 14px;
+        }
+        .legal th { background: #161b22; color: #e6edf3; }
+        .legal .highlight {
+            background: rgba(35, 134, 54, 0.08);
+            border-left: 3px solid #238636;
+            padding: 16px 20px;
+            border-radius: 4px;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <nav class="nav">
+        <div class="wrap">
+            <a href="/" class="logo">◈ Sweeper</a>
+            <div class="nav-links"><a href="/app.html">Launch App</a></div>
+        </div>
+    </nav>
+
+    <main class="wrap">
+        <article class="legal">
+            <h1>Privacy Policy</h1>
+            <p class="updated">Last updated: 2026-09-15</p>
+
+            <div class="highlight">
+                <strong>Short version:</strong> We don't have your keys, your
+                mnemonic, your wallet addresses, your email, or your name.
+                We have almost nothing to leak.
+            </div>
+
+            <h2>1. What we don't collect</h2>
+            <p>The Service is designed to collect as little as possible. We do <strong>not</strong> collect, store, or transmit:</p>
+            <ul>
+                <li>Your mnemonic phrases or seed words</li>
+                <li>Your private keys</li>
+                <li>Your wallet addresses (except as described in §3 below)</li>
+                <li>Your email address (unless you voluntarily contact us)</li>
+                <li>Your name, physical address, or phone number</li>
+                <li>Your government ID or any KYC information</li>
+                <li>Your transaction history</li>
+                <li>Your browsing history on other sites</li>
+            </ul>
+            <p>
+                All wallet processing — derivation, signing, broadcasting —
+                happens entirely in your browser. Your keys never leave your
+                device.
+            </p>
+
+            <h2>2. What we do collect</h2>
+
+            <h3>2.1 Server logs</h3>
+            <p>
+                When you load our website, our hosting provider (Cloudflare
+                Workers, or similar) records standard HTTP logs: IP address,
+                timestamp, requested URL, HTTP method, user agent, referer.
+                These are used for security, abuse prevention, and
+                troubleshooting. Retention: up to 30 days.
+            </p>
+
+            <h3>2.2 RPC proxy logs (if you use our proxy)</h3>
+            <p>
+                If you use our RPC proxy (as opposed to running your own RPC),
+                the proxy records: IP address, timestamp, which chain was
+                queried, HTTP status. We do <strong>not</strong> log:
+            </p>
+            <ul>
+                <li>The request body (JSON-RPC method and parameters)</li>
+                <li>Wallet addresses being queried</li>
+                <li>Transaction hashes</li>
+                <li>Response bodies</li>
+            </ul>
+            <p>Retention: up to 7 days.</p>
+
+            <h3>2.3 Analytics</h3>
+            <p>
+                We may use privacy-respecting analytics that do
+                <strong>not</strong> use cookies, do not fingerprint users, and
+                do not collect personal data. We only see aggregate page views
+                and referrers.
+            </p>
+
+            <h2>3. What third parties see</h2>
+            <p>
+                When you use the Service, your browser makes requests directly
+                to:
+            </p>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>Party</th>
+                        <th>What they see</th>
+                        <th>Why</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Blockchain RPC providers (Alchemy, Helius, or public RPCs)</td>
+                        <td>Your IP, the wallet address you're querying, the transactions you broadcast</td>
+                        <td>Necessary to read balances and broadcast transactions</td>
+                    </tr>
+                    <tr>
+                        <td>Jupiter (Solana swaps)</td>
+                        <td>Your IP, the swap quote you request</td>
+                        <td>To compute swap routes</td>
+                    </tr>
+                    <tr>
+                        <td>mempool.space (Bitcoin)</td>
+                        <td>Your IP, the address you're querying</td>
+                        <td>To read UTXOs and broadcast Bitcoin transactions</td>
+                    </tr>
+                    <tr>
+                        <td>Cloudflare (hosting)</td>
+                        <td>Your IP, the URL you requested</td>
+                        <td>Serving the site, DDoS protection</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <p>
+                We cannot control what these third parties do with the data they
+                see. Their privacy policies apply. If you require maximum
+                privacy, run your own RPC endpoints and use the Service from a
+                VPN or Tor.
+            </p>
+
+            <h2>4. Cookies</h2>
+            <p>
+                The Service does not set any cookies. It does not use
+                localStorage, sessionStorage, or IndexedDB to persist any data
+                between sessions. When you close the tab, everything is gone.
+            </p>
+
+            <h2>5. Data retention</h2>
+            <p>
+                Because we don't collect your data in the first place, there's
+                nothing to retain. Server logs are retained as described in §2.
+            </p>
+
+            <h2>6. Children</h2>
+            <p>
+                The Service is not intended for anyone under 18. We do not
+                knowingly collect information from children. If you believe a
+                child has used the Service, contact us and we will take
+                appropriate action.
+            </p>
+
+            <h2>7. Your rights</h2>
+            <p>
+                Depending on your jurisdiction, you may have rights under
+                GDPR, CCPA, or similar laws. Because we don't collect personal
+                data, most of these rights are moot — but if you have a
+                question, contact us.
+            </p>
+
+            <h2>8. Changes</h2>
+            <p>
+                We may update this Privacy Policy from time to time. Material
+                changes will be posted on this page with a new "Last updated"
+                date.
+            </p>
+
+            <h2>9. Contact</h2>
+            <p>
+                Questions about privacy? Contact us at
+                <a href="mailto:privacy@sweeper.cloud">privacy@sweeper.cloud</a>.
+            </p>
+        </article>
+    </main>
+
+    <footer class="footer">
+        <div class="wrap">
+            <div class="footer-bottom">
+                <p>© 2026 Sweeper Labs. <a href="/">Home</a> · <a href="/terms.html">Terms</a> · <a href="/security-policy.html">Security</a></p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>

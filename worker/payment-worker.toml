@@ -1,0 +1,8 @@
+name = "sweep-payment"
+main = "payment-worker.js"
+compatibility_date = "2024-09-23"
+
+kv_namespaces = [
+  { binding = "CREDITS", id = "dbce7fee39a04e1191e2337e8533ce13" },
+  { binding = "PENDING_PAYMENTS", id = "523b202a4d764d0f8b96c7dc367cd495" }
+]

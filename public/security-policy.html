@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Security Policy — Sweeper</title>
+    <link rel="stylesheet" href="marketing.css">
+    <style>
+        .legal { padding: 60px 0; max-width: 720px; margin: 0 auto; }
+        .legal h1 { margin-bottom: 8px; }
+        .legal .updated { color: #8b949e; font-size: 14px; margin-bottom: 40px; }
+        .legal h2 { font-size: 22px; text-align: left; margin: 40px 0 12px; }
+        .legal h3 { font-size: 16px; margin: 24px 0 8px; color: #e6edf3; }
+        .legal p, .legal li { color: #c9d1d9; font-size: 15px; margin-bottom: 12px; }
+        .legal ul, .legal ol { padding-left: 24px; margin-bottom: 16px; }
+        .legal strong { color: #e6edf3; }
+        .legal code {
+            background: #161b22;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 13px;
+            font-family: ui-monospace, monospace;
+            color: #79c0ff;
+        }
+        .legal .info {
+            background: rgba(88, 166, 255, 0.08);
+            border-left: 3px solid #58a6ff;
+            padding: 16px 20px;
+            border-radius: 4px;
+            margin: 20px 0;
+        }
+        .legal .warn {
+            background: rgba(218, 54, 51, 0.1);
+            border-left: 3px solid #da3633;
+            padding: 16px 20px;
+            border-radius: 4px;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <nav class="nav">
+        <div class="wrap">
+            <a href="/" class="logo">◈ Sweeper</a>
+            <div class="nav-links"><a href="/app.html">Launch App</a></div>
+        </div>
+    </nav>
+
+    <main class="wrap">
+        <article class="legal">
+            <h1>Security Policy</h1>
+            <p class="updated">Last updated: 2026-09-15</p>
+
+            <div class="info">
+                <strong>Security contact:</strong>
+                <a href="mailto:security@sweeper.cloud">security@sweeper.cloud</a> —
+                PGP key fingerprint available on request.
+            </div>
+
+            <h2>1. Our security model</h2>
+            <p>
+                Sweeper is designed so that a compromise of our infrastructure
+                results in <strong>zero loss of user funds</strong>.
+            </p>
+            <ul>
+                <li>We do not hold user funds.</li>
+                <li>We do not hold, receive, or store private keys or mnemonics.</li>
+                <li>We do not sign transactions on behalf of users.</li>
+                <li>We do not have a database of user data to breach.</li>
+            </ul>
+            <p>
+                The Service is a static bundle of HTML, JavaScript, and CSS,
+                served from a CDN. There is no backend that processes user
+                input.
+            </p>
+
+            <h2>2. Threat model</h2>
+
+            <h3>2.1 What we protect against</h3>
+            <ul>
+                <li><strong>Server-side breaches.</strong> Because we don't have user data, a breach of our servers leaks nothing sensitive.</li>
+                <li><strong>Network interception.</strong> All traffic is HTTPS-only. HSTS is enabled.</li>
+                <li><strong>Dependency confusion.</strong> We pin all npm dependencies to exact versions and audit them before updates.</li>
+                <li><strong>Supply chain attacks on npm.</strong> We publish a SHA-256 hash of every release so users can verify the bundle they load.</li>
+                <li><strong>Malicious RPCs.</strong> We allow users to configure their own RPC endpoints, and we display the RPC URL in use during every sweep.</li>
+            </ul>
+
+            <h3>2.2 What we cannot protect against</h3>
+            <ul>
+                <li><strong>A compromised user device.</strong> If your computer or phone is infected with malware, no web tool can protect you.</li>
+                <li><strong>Malicious browser extensions.</strong> An extension with permission to read page content can steal form input. Use a clean browser profile.</li>
+                <li><strong>A compromised CDN.</strong> If our hosting provider is compromised and serves modified JavaScript, keys could be stolen. Mitigations: verify the bundle hash, read the source, run locally.</li>
+                <li><strong>Compromised dependencies.</strong> A malicious update to a transitive dependency could inject code. We mitigate by pinning versions, but cannot eliminate the risk.</li>
+                <li><strong>A compromised RPC endpoint.</strong> A malicious RPC could lie about balances, censor transactions, or leak metadata. Use reputable RPCs.</li>
+                <li><strong>Malicious smart contracts.</strong> The Service interacts with third-party DEXs (Uniswap, Jupiter). Those contracts may have vulnerabilities we cannot control.</li>
+                <li><strong>MEV and front-running.</strong> Public mempools allow sandwich attacks. We cannot prevent this on all chains.</li>
+            </ul>
+
+            <h2>3. How to verify the Service</h2>
+
+            <h3>3.1 Verify your keys don't leave your browser</h3>
+            <ol>
+                <li>Open your browser's DevTools (F12 or Cmd+Option+I).</li>
+                <li>Go to the Network tab.</li>
+                <li>Enable "Preserve log."</li>
+                <li>Paste a test mnemonic into the app and click Preview.</li>
+                <li>Inspect every request. Search the request bodies for a word from your mnemonic.</li>
+                <li>You will find none.</li>
+            </ol>
+
+            <h3>3.2 Verify the JavaScript bundle</h3>
+            <p>
+                We publish the SHA-256 hash of the app bundle at
+                <code>/releases/latest.txt</code>. To verify:
+            </p>
+            <ol>
+                <li>Download the bundle your browser loaded: <code>curl -s https://sweeper.cloud/app.js | openssl dgst -sha256</code></li>
+                <li>Compare against the published hash.</li>
+                <li>If they match, you're running the code we published. If they don't, don't use the Service — and contact us.</li>
+            </ol>
+
+            <h3>3.3 Read the source</h3>
+            <p>
+                The signing logic is open source, MIT licensed, at
+                <a href="https://github.com/smallcapstradingsystem-prog/sweep-app">github.com/smallcapstradingsystem-prog/sweep-app</a>.
+                The core files are:
+            </p>
+            <ul>
+                <li><code>src/derive.js</code> — mnemonic → keys (audit this first)</li>
+                <li><code>src/evm.js</code> — EVM sweep logic</li>
+                <li><code>src/solana.js</code> — Solana sweep logic</li>
+                <li><code>src/bitcoin.js</code> — Bitcoin sweep logic</li>
+            </ul>
+
+            <h2>4. Reporting a vulnerability</h2>
+            <p>
+                If you discover a security vulnerability, please report it
+                privately to
+                <a href="mailto:security@sweeper.cloud">security@sweeper.cloud</a>.
+            </p>
+            <p>Please include:</p>
+            <ul>
+                <li>A description of the vulnerability</li>
+                <li>Steps to reproduce it</li>
+                <li>Any proof-of-concept code</li>
+                <li>Your assessment of the impact</li>
+            </ul>
+            <p>
+                <strong>Do not</strong> open a public GitHub issue, post on
+                social media, or disclose the vulnerability publicly until we
+                have had a chance to respond.
+            </p>
+
+            <h3>4.1 Our commitment</h3>
+            <ul>
+                <li>We will acknowledge your report within 72 hours.</li>
+                <li>We will provide an initial assessment within 7 days.</li>
+                <li>We will keep you informed of our remediation progress.</li>
+                <li>We will credit you in the disclosure (unless you prefer anonymity).</li>
+                <li>We will not pursue legal action against researchers who follow this policy.</li>
+            </ul>
+
+            <h2>5. Incident response</h2>
+            <p>If we become aware of a security incident affecting users:</p>
+            <ol>
+                <li>We will investigate immediately.</li>
+                <li>If the incident affects the live app, we will take it offline.</li>
+                <li>We will notify affected users via our website and social channels.</li>
+                <li>We will publish a post-mortem within 14 days of resolution.</li>
+            </ol>
+
+            <h2>6. Our security practices</h2>
+            <ul>
+                <li><strong>No tracking scripts.</strong> We don't run Google Analytics, Facebook Pixel, or any third-party tracker that could read the DOM.</li>
+                <li><strong>Strict Content Security Policy.</strong> The app enforces a CSP that blocks inline scripts and unauthorized origins.</li>
+                <li><strong>HTTPS only.</strong> HSTS is enabled with a long max-age.</li>
+                <li><strong>No cookies.</strong> The Service sets no cookies, ever.</li>
+                <li><strong>Pinned dependencies.</strong> All npm packages are pinned to exact versions, not ranges.</li>
+                <li><strong>2FA on all accounts.</strong> GitHub, Cloudflare, npm, and email accounts all have 2FA.</li>
+                <li><strong>Hardware keys.</strong> Production access requires a hardware security key.</li>
+            </ul>
+
+            <h2>7. What to do if you suspect a compromise</h2>
+            <div class="warn">
+                If you believe your mnemonic has been compromised, act
+                immediately: move any remaining funds to a fresh wallet using
+                a different device. Do not continue using the compromised
+                wallet.
+            </div>
+            <p>
+                If you believe <em>the Service</em> has been compromised, stop
+                using it and contact us immediately at
+                <a href="mailto:security@sweeper.cloud">security@sweeper.cloud</a>.
+            </p>
+
+            <h2>8. Compliance</h2>
+            <p>
+                We comply with applicable laws in our jurisdiction of
+                incorporation. We do not provide services to individuals
+                located in comprehensively sanctioned jurisdictions. We
+                cooperate with lawful requests from law enforcement, subject to
+                applicable legal process.
+            </p>
+
+            <h2>9. Changes</h2>
+            <p>
+                We may update this Security Policy from time to time. Material
+                changes will be posted on this page.
+            </p>
+        </article>
+    </main>
+
+    <footer class="footer">
+        <div class="wrap">
+            <div class="footer-bottom">
+                <p>© 2026 Sweeper Labs. <a href="/">Home</a> · <a href="/terms.html">Terms</a> · <a href="/privacy.html">Privacy</a></p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>
