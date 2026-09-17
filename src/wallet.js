@@ -107,6 +107,21 @@ export class BrowserExtensionBackend {
     return this.provider.getSigner();
   }
 
+  /**
+   * Read the wallet's *current* chain id, straight from the injected
+   * provider — not from the cached `this.chainId`, which can be stale
+   * if the user switched networks in the extension between calls.
+   */
+  async getChainId() {
+    const hex = await this.rawProvider.request({ method: 'eth_chainId' });
+    const parsed = parseInt(hex, 16);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new Error(`Wallet returned an invalid chain id: ${hex}`);
+    }
+    this.chainId = parsed;
+    return parsed;
+  }
+
   getSolanaKeypair() {
     throw new Error('Browser extensions do not support Solana in this build');
   }
@@ -118,16 +133,33 @@ export class BrowserExtensionBackend {
   /**
    * Ask the extension to switch to a specific chain.
    * Called by the sweep code before each chain's transactions.
+   *
+   * The second argument is accepted for signature parity with
+   * WalletConnectBackend.switchChain but is unused — extensions
+   * already know every chain they support.
    */
-  async switchChain(chainId) {
-    const hex = '0x' + Number(chainId).toString(16);
-    if (this.chainId === Number(chainId)) return true;
+  async switchChain(chainId, _extra = {}) {
+    const target = Number(chainId);
+
+    // If we can determine the current chain and it already matches,
+    // short-circuit. If we can't determine it, fall through and attempt
+    // the switch anyway — wallet_switchEthereumChain is idempotent, and
+    // assuming a stale cached value could skip a needed switch.
+    try {
+      const current = await this.getChainId();
+      if (current === target) return true;
+    } catch {
+      // Couldn't read current chain — attempt the switch below.
+    }
+
+    const hex = '0x' + target.toString(16);
     try {
       await this.rawProvider.request({
         method: 'wallet_switchEthereumChain',
         params: [{ chainId: hex }],
       });
-      this.chainId = Number(chainId);
+      // Re-read after the switch — some wallets lie about success.
+      await this.getChainId();
       return true;
     } catch (e) {
       // 4902 = chain not added to the wallet
@@ -183,8 +215,9 @@ export async function connectBrowserExtension() {
 // =====================================================================
 
 export class WalletConnectBackend {
-  constructor(provider, address, chainId) {
-    this.provider = provider;
+  constructor(wcProvider, ethersProvider, address, chainId) {
+    this.wcProvider = wcProvider;        // raw @walletconnect/ethereum-provider instance
+    this.provider = ethersProvider;      // ethers.BrowserProvider wrapping wcProvider
     this.address = address;
     this.chainId = chainId;
   }
@@ -197,6 +230,27 @@ export class WalletConnectBackend {
     return this.provider.getSigner();
   }
 
+  /**
+   * Read the session's *current* chain id, straight from the
+   * WalletConnect provider. The cached `this.chainId` is only a hint —
+   * the user can switch chains in their mobile wallet at any time, and
+   * the session's reported chain updates asynchronously.
+   */
+  async getChainId() {
+    const cid = this.wcProvider.chainId;
+    if (typeof cid === 'number' && cid > 0) {
+      this.chainId = cid;
+      return cid;
+    }
+    const hex = await this.wcProvider.request({ method: 'eth_chainId' });
+    const parsed = parseInt(hex, 16);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      throw new Error(`WalletConnect returned an invalid chain id: ${hex}`);
+    }
+    this.chainId = parsed;
+    return parsed;
+  }
+
   getSolanaKeypair() {
     throw new Error('WalletConnect does not support Solana in this build');
   }
@@ -205,9 +259,75 @@ export class WalletConnectBackend {
     throw new Error('WalletConnect does not support Bitcoin in this build');
   }
 
+  /**
+   * Ask the WC session to switch to a specific chain.
+   *
+   * WalletConnect relays the request to the mobile wallet, which may
+   * prompt the user or switch silently depending on the app. If the
+   * chain isn't in the session's approved list, the wallet may reject.
+   *
+   * @param {number} chainId - the EIP-155 chain id to switch to
+   * @param {object} [extra]  - optional `{ rpcUrls, chainName, nativeCurrency, blockExplorerUrls }`
+   *                            to offer the wallet when it doesn't know the chain
+   */
+  async switchChain(chainId, extra = {}) {
+    const target = Number(chainId);
+
+    // If we can determine the current chain and it already matches,
+    // short-circuit. If we can't determine it, fall through and attempt
+    // the switch anyway — wallet_switchEthereumChain is idempotent.
+    try {
+      const current = await this.getChainId();
+      if (current === target) return true;
+    } catch {
+      // Couldn't read current chain — attempt the switch below.
+    }
+
+    const hex = '0x' + target.toString(16);
+    try {
+      await this.wcProvider.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: hex }],
+      });
+      // Re-read after the switch.
+      await this.getChainId();
+      return true;
+    } catch (e) {
+      const code = e?.code ?? e?.data?.originalError?.code;
+      const msg = String(e?.message || '');
+      const isMissingChain =
+        code === 4902 ||
+        msg.includes('Unrecognized chain ID') ||
+        (msg.includes('chainId') && msg.includes('not') && msg.includes('added'));
+
+      if (isMissingChain && extra.rpcUrls) {
+        // Ask the wallet to add the chain, then we're done — WC wallets
+        // switch automatically after a successful add.
+        try {
+          await this.wcProvider.request({
+            method: 'wallet_addEthereumChain',
+            params: [{
+              chainId: hex,
+              chainName: extra.chainName || `Chain ${target}`,
+              rpcUrls: extra.rpcUrls,
+              nativeCurrency: extra.nativeCurrency || { name: 'ETH', symbol: 'ETH', decimals: 18 },
+              blockExplorerUrls: extra.blockExplorerUrls || [],
+            }],
+          });
+          await this.getChainId();
+          return true;
+        } catch (addErr) {
+          throw new Error(`WalletConnect could not add chain ${target}: ${addErr.message || addErr}`);
+        }
+      }
+
+      throw new Error(`WalletConnect could not switch to chain ${target}: ${msg || e}`);
+    }
+  }
+
   async dispose() {
     try {
-      await this.provider.disconnect?.();
+      await this.wcProvider.disconnect?.();
     } catch {}
   }
 }
@@ -265,7 +385,7 @@ export async function connectWalletConnect({
 
   const ethersProvider = new ethers.BrowserProvider(wcProvider);
 
-  return new WalletConnectBackend(ethersProvider, address, wcProvider.chainId);
+  return new WalletConnectBackend(wcProvider, ethersProvider, address, wcProvider.chainId);
 }
 
 // =====================================================================

@@ -9,6 +9,7 @@
  *   POST /credits/claim-info    — read free-credit claim window state
  *   POST /credits/claim-free    — grant 3 free credits if within window
  *   POST /gas/sponsor           — fund a user wallet with native gas
+ *   POST /sweep/commit          — commit a sweep's destination (server-authoritative)
  *   POST /fee/record            — record sweep receipts
  *   GET  /fee/pending           — operator view: pending forwards
  *   GET  /fee/summary           — operator view: totals by chain
@@ -29,7 +30,7 @@
  *
  * KV namespaces:
  *   CREDITS             — balances, history, free-claim state, rate limits,
- *                         fee records
+ *                         fee records, sweep commits
  *   PENDING_PAYMENTS    — crypto payment records
  */
 
@@ -105,6 +106,24 @@ const SPONSOR_RPC = {
   bnb:      'https://bsc-rpc.publicnode.com',
 };
 
+// Native-gas-per-tx targets. The worker sends exactly enough to bring
+// the user's wallet up to this value; it never sends more.
+//
+// NOTE: These values must match GAS_PER_TX_COST in config.js. If they
+// drift, the client's gas check and the worker's sponsor send will
+// disagree and sweeps will fail intermittently.
+const SPONSOR_TARGET_WEI = {
+  ethereum: '0.0008',
+  arbitrum: '0.00002',
+  optimism: '0.00002',
+  base:     '0.00002',
+  polygon:  '0.01',
+  bnb:      '0.0002',
+};
+
+// Hard cap on a single sponsor send, regardless of computed shortfall.
+// Belt-and-braces: even if the target value is somehow wrong for a
+// chain, the worker won't exceed this.
 const SPONSOR_MAX_WEI = {
   ethereum: '0.005', arbitrum: '0.0005', optimism: '0.0005',
   base: '0.0005', polygon: '0.2', bnb: '0.005',
@@ -119,6 +138,17 @@ const FREE_CLAIM_START_TTL = 48 * 60 * 60;
 const FREE_CLAIM_GRANTED_TTL = 60 * 60 * 24 * 365;
 const FREE_CLAIM_IP_MAX = 3;
 const FREE_CLAIM_IP_TTL = 60 * 60 * 24 * 7;
+
+// Sweep commits are keyed by sweepId and hold the authoritative
+// destination for a sweep. Written by /sweep/commit, read by
+// /fee/record.
+//
+// Kept at least as long as the fee record's expected lifetime. The
+// fee record itself has no TTL (it lives until /fee/mark-forwarded),
+// so 30 days gives the operator plenty of runway to reconcile before
+// the commit vanishes — important if on-chain receipt verification is
+// ever added, since that would need the commit to still be alive.
+const SWEEP_COMMIT_TTL = 60 * 60 * 24 * 30;
 
 // =====================================================================
 // SPONSOR WALLET — accepts hex private key OR BIP-39 mnemonic
@@ -195,6 +225,8 @@ export default {
       if (path === '/credits/claim-free' && request.method === 'POST') return await handleClaimFree(request, env, cors);
 
       if (path === '/gas/sponsor' && request.method === 'POST') return await handleGasSponsor(request, env, cors);
+
+      if (path === '/sweep/commit' && request.method === 'POST') return await handleSweepCommit(request, env, cors);
 
       if (path === '/fee/record'          && request.method === 'POST') return await handleFeeRecord(request, env, cors);
       if (path === '/fee/pending'         && request.method === 'GET')  return await handleFeePending(request, env, cors);
@@ -577,6 +609,16 @@ async function handleClaimFree(request, env, cors) {
 // =====================================================================
 // GAS SPONSORSHIP
 // =====================================================================
+//
+// The worker decides the amount, not the client. `shortfallWei` from
+// the client is treated as a *hint* that the wallet is short; the
+// worker independently reads the on-chain balance and computes the
+// real shortfall from SPONSOR_TARGET_WEI. This closes the "free ETH
+// faucet" hole where a client could ask for any amount up to the cap.
+//
+// The client's hint is still checked against SPONSOR_MAX_WEI, and the
+// computed send is also capped by SPONSOR_MAX_WEI — belt and braces.
+// =====================================================================
 
 async function handleGasSponsor(request, env, cors) {
   const ip = request.headers.get('cf-connecting-ip') || 'unknown';
@@ -590,11 +632,13 @@ async function handleGasSponsor(request, env, cors) {
   if (!toAddress || !/^0x[a-fA-F0-9]{40}$/.test(toAddress)) return json({ error: 'valid toAddress required' }, 400, cors);
   if (!shortfallWei || !/^\d+$/.test(String(shortfallWei))) return json({ error: 'shortfallWei required (decimal string)' }, 400, cors);
 
-  const shortfall = BigInt(shortfallWei);
-  if (shortfall === 0n) return json({ ok: true, sent: '0', reason: 'no shortfall' }, 200, cors);
+  // The client's hint is only used to reject obviously-bogus requests.
+  // The actual send amount is computed below from chain state.
+  const clientHint = BigInt(shortfallWei);
+  if (clientHint === 0n) return json({ ok: true, sent: '0', reason: 'no shortfall' }, 200, cors);
 
   const maxSend = ethers.parseEther(SPONSOR_MAX_WEI[chain]);
-  if (shortfall > maxSend) return json({ error: `shortfall exceeds safe maximum for ${chain}` }, 400, cors);
+  if (clientHint > maxSend) return json({ error: `shortfall exceeds safe maximum for ${chain}` }, 400, cors);
 
   if (!env.GAS_SPONSOR_KEY) return json({ error: 'sponsor not configured' }, 500, cors);
 
@@ -613,6 +657,17 @@ async function handleGasSponsor(request, env, cors) {
   const provider = sponsorWallet.provider;
   const sponsorAddress = await sponsorWallet.getAddress();
 
+  // Authoritative shortfall: read the user's on-chain balance and
+  // compute how much is needed to reach SPONSOR_TARGET_WEI.
+  const target = ethers.parseEther(SPONSOR_TARGET_WEI[chain]);
+  const userBalance = await provider.getBalance(toAddress);
+  if (userBalance >= target) {
+    return json({ ok: true, sent: '0', reason: 'user already funded' }, 200, cors);
+  }
+  let shortfall = target - userBalance;
+  if (shortfall > maxSend) shortfall = maxSend;
+
+  // Check the sponsor can cover the send plus a small gas buffer.
   const sponsorBalance = await provider.getBalance(sponsorAddress);
   const feeData = await provider.getFeeData();
   const gasPrice = feeData.gasPrice ?? 0n;
@@ -669,6 +724,56 @@ async function checkSponsorRate(env, ip) {
 }
 
 // =====================================================================
+// SWEEP COMMIT — server-authoritative destination
+// =====================================================================
+//
+// Committed before the sweep begins. /fee/record reads the commit and
+// overwrites any client-supplied userDestination. This closes the hole
+// where a client could submit a fake receipt pointing at an attacker
+// address; the operator view will only ever show the destination that
+// was committed up front.
+//
+// The commit is keyed by sweepId and is idempotent: re-calling with
+// the same sweepId + destination returns `alreadyCommitted: true`.
+// Changing the destination for an existing sweep is refused with 409.
+// =====================================================================
+
+async function handleSweepCommit(request, env, cors) {
+  const { clientId, sweepId, userDestination } = await request.json();
+
+  if (!clientId || typeof clientId !== 'string' || clientId.length < 16) {
+    return json({ error: 'clientId required' }, 400, cors);
+  }
+  if (!sweepId || typeof sweepId !== 'string' || sweepId.length < 8) {
+    return json({ error: 'sweepId required (min 8 chars)' }, 400, cors);
+  }
+  if (!userDestination || typeof userDestination !== 'string' || !/^0x[a-fA-F0-9]{40}$/.test(userDestination)) {
+    return json({ error: 'userDestination must be a 0x address' }, 400, cors);
+  }
+
+  const key = `sweep:${sweepId}`;
+  const existing = await env.CREDITS.get(key);
+  if (existing) {
+    const parsed = JSON.parse(existing);
+    if (parsed.clientId !== clientId) {
+      return json({ error: 'sweep already committed by a different client' }, 409, cors);
+    }
+    if (parsed.userDestination.toLowerCase() !== userDestination.toLowerCase()) {
+      return json({ error: 'sweep already committed with a different destination' }, 409, cors);
+    }
+    return json({ ok: true, alreadyCommitted: true }, 200, cors);
+  }
+
+  await env.CREDITS.put(key, JSON.stringify({
+    clientId,
+    userDestination,
+    committedAt: new Date().toISOString(),
+  }), { expirationTtl: SWEEP_COMMIT_TTL });
+
+  return json({ ok: true }, 200, cors);
+}
+
+// =====================================================================
 // FEE RECORDING — operator view for the manual forward model
 // =====================================================================
 
@@ -699,9 +804,25 @@ async function handleFeeRecord(request, env, cors) {
     return json({ ok: true, sweepId, alreadyRecorded: true, status: 'pending' }, 200, cors);
   }
 
+  // Load the sweep commit written at sweep start. This is the
+  // authoritative source for the destination address. If no commit
+  // exists, the sweep was never registered and we refuse to record it.
+  const commitRaw = await env.CREDITS.get(`sweep:${sweepId}`);
+  if (!commitRaw) {
+    return json({ error: 'sweepId not committed — call /sweep/commit before sweeping' }, 400, cors);
+  }
+  let commit;
+  try { commit = JSON.parse(commitRaw); }
+  catch { return json({ error: 'sweep commit is corrupt' }, 500, cors); }
+  if (commit.clientId !== clientId) {
+    return json({ error: 'sweepId belongs to a different client' }, 403, cors);
+  }
+  const authoritativeDestination = commit.userDestination;
+
   // Validate every receipt's shape so buildOperatorView can't throw
   // on malformed input. Rejects the whole batch rather than partially
-  // recording.
+  // recording. Also overwrite the client-supplied userDestination with
+  // the committed one — the client's version is never trusted.
   for (let i = 0; i < receipts.length; i++) {
     const r = receipts[i];
     if (!r || typeof r !== 'object') {
@@ -728,6 +849,23 @@ async function handleFeeRecord(request, env, cors) {
     if (typeof r.userDestination !== 'string' || !/^0x[a-fA-F0-9]{40}$/.test(r.userDestination)) {
       return json({ error: `receipt[${i}].userDestination must be a 0x address` }, 400, cors);
     }
+
+    // If the client sent a destination different from what was
+    // committed, log it. This is a tamper signal — the worker uses the
+    // committed value regardless, but the operator should know if a
+    // client tried to substitute a different address.
+    if (r.userDestination.toLowerCase() !== authoritativeDestination.toLowerCase()) {
+      console.warn('Destination mismatch on fee record', {
+        sweepId,
+        clientId,
+        clientSent: r.userDestination,
+        committed: authoritativeDestination,
+      });
+    }
+
+    // Ignore whatever the client sent. Replace with the committed
+    // destination. This is the whole point of the sweep-commit flow.
+    r.userDestination = authoritativeDestination;
   }
 
   const operatorView = buildOperatorView(receipts, gasSponsorships);

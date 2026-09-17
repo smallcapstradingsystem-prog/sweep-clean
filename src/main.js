@@ -7,6 +7,15 @@
  *     keeping the 10% service fee.
  *   - The operator view in the payment worker shows exactly what to
  *     forward, per chain, minus any gas sponsorship fees.
+ *
+ * Trust model:
+ *   - Credits are server-authoritative (worker holds balance).
+ *   - The sweep destination is committed to the worker before the
+ *     sweep begins. /fee/record reads that commit and overwrites any
+ *     client-supplied destination, so the operator view can't be
+ *     tricked into forwarding to an attacker address.
+ *   - Amounts in receipts are still client-reported; the operator
+ *     should verify them against the chain before forwarding large sums.
  */
 
 import { ethers } from 'ethers';
@@ -28,6 +37,7 @@ import {
   getClientId, fetchBalance, consumeCredit, invalidateBalanceCache,
   recordFee, requestGasSponsorship,
   fetchClaimInfo, claimFreeCredits,
+  commitSweep,
 } from './credits.js';
 import { showCryptoPaymentModal } from './crypto-pay.js';
 import {
@@ -49,6 +59,13 @@ const MIN_SPONSOR_FLOOR_USDC = 0.02;
 // so retries never create duplicate operator-view entries.
 const FEE_RECORD_MAX_ATTEMPTS = 3;
 const FEE_RECORD_BACKOFF_MS = [1000, 3000];  // between attempts 1→2, 2→3
+
+// Retry settings for the sweep-commit call. The worker is idempotent
+// on (sweepId, destination), so a retry after a transient 5xx is safe.
+// Fewer attempts than the fee-record retry: the commit happens before
+// the credit is consumed, so failing here just aborts cleanly.
+const COMMIT_MAX_ATTEMPTS = 2;
+const COMMIT_BACKOFF_MS = 1000;
 
 // =====================================================================
 // VALIDATION HELPERS
@@ -82,6 +99,145 @@ function scrubSecret(text) {
   return s
     .replace(/\b([a-z]{3,}\s+){11,}[a-z]{3,}\b/g, '[REDACTED-MNEMONIC]')
     .replace(/0x[a-fA-F0-9]{64}/g, '0x[REDACTED-KEY]');
+}
+
+// =====================================================================
+// CHAIN VERIFICATION
+// =====================================================================
+//
+// Before signing an EVM transaction, confirm that BOTH the ethers
+// provider and the underlying wallet agree on the chain id. A mismatch
+// usually means:
+//   - the extension/WC session is on a different chain than the RPC
+//     we're building the tx against
+//   - the user switched networks between the switchChain call and now
+//   - getRpcUrl() returned a stale endpoint
+//
+// Throwing here is better than broadcasting a tx on the wrong chain.
+//
+// Also checks that the router contract is deployed at the configured
+// address — catches chain-id collisions and misconfigured RPCs — and
+// that the signer's address matches the connected account, so a user
+// who switched accounts in the extension can't sign the wrong tx.
+// =====================================================================
+
+// Custom error so we can distinguish our verification failures from
+// unrelated errors raised inside getNetwork()/getCode(). A flag or a
+// regex would be brittle; a proper error class is not.
+class ChainVerifyError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ChainVerifyError';
+  }
+}
+
+async function verifySignerChain(chain, provider, signer, expectedAddress) {
+  const cfg = EVM_CHAINS[chain];
+  if (!cfg) throw new ChainVerifyError(`verifySignerChain: unknown chain ${chain}`);
+  const expected = Number(cfg.chainId);
+
+  // (a) RPC's view of the chain id.
+  const net = await provider.getNetwork();
+  const rpcChainId = Number(net.chainId);
+  if (rpcChainId !== expected) {
+    throw new ChainVerifyError(
+      `RPC chain mismatch: provider reports ${rpcChainId}, expected ${expected} (${chain}). ` +
+      `Check the RPC URL for this chain.`
+    );
+  }
+
+  // (b) Signer provider's view — for extension/WC this is the wallet.
+  // For mnemonic/hardware it's the same JsonRpcProvider, so this is a
+  // no-op sanity check in those cases.
+  try {
+    const sp = signer.provider;
+    if (sp && typeof sp.getNetwork === 'function') {
+      const signerNet = await sp.getNetwork();
+      const signerChainId = Number(signerNet.chainId);
+      if (signerChainId !== expected) {
+        throw new ChainVerifyError(
+          `Wallet is on chain ${signerChainId}, expected ${expected} (${chain}). ` +
+          `Switch the wallet to the correct network and retry.`
+        );
+      }
+    }
+  } catch (e) {
+    if (e instanceof ChainVerifyError) throw e;
+    // Some hardware signer shims don't expose getNetwork. That's fine —
+    // the RPC check above already passed. Any other error from the
+    // signer's provider is non-fatal here for the same reason.
+  }
+
+  // (c) Signer address matches the address we think we're sweeping.
+  // Catches the case where the user changed accounts in the extension
+  // between connecting and pressing Run.
+  if (expectedAddress) {
+    const signerAddr = await signer.getAddress();
+    if (signerAddr.toLowerCase() !== expectedAddress.toLowerCase()) {
+      throw new ChainVerifyError(
+        `Signer returned ${signerAddr}, expected ${expectedAddress}. ` +
+        `Switch back to the originally connected account.`
+      );
+    }
+  }
+
+  // (d) Router deployment check. A correctly-deployed contract returns
+  // non-empty bytecode. On a fork or a wrong chain with the same id,
+  // this is '0x'.
+  let code;
+  try {
+    code = await provider.getCode(cfg.router);
+  } catch (e) {
+    throw new ChainVerifyError(`Could not verify router on ${chain}: ${scrubSecret(e.message)}`);
+  }
+  if (!code || code === '0x' || code === '0x0') {
+    throw new ChainVerifyError(
+      `Router ${cfg.router} is not deployed on ${chain} (chainId ${expected}). ` +
+      `The RPC may be pointing at a fork or testnet.`
+    );
+  }
+
+  return { chainId: expected, router: cfg.router };
+}
+
+// Per-chain params used by wallet_addEthereumChain when the wallet
+// doesn't know the chain yet (rare for the majors, but Coinbase Wallet
+// on a fresh browser profile sometimes needs a nudge). RPC URLs are
+// public endpoints — deliberately not the proxy URL, which requires
+// the request to come from our own origin.
+function chainExtraParams(chain) {
+  const cfg = EVM_CHAINS[chain];
+  if (!cfg) return {};
+  const rpcUrls = {
+    ethereum: ['https://ethereum-rpc.publicnode.com'],
+    arbitrum: ['https://arbitrum-one-rpc.publicnode.com'],
+    optimism: ['https://optimism-rpc.publicnode.com'],
+    base:     ['https://base-rpc.publicnode.com'],
+    polygon:  ['https://polygon-bor-rpc.publicnode.com'],
+    bnb:      ['https://bsc-rpc.publicnode.com'],
+  }[chain];
+  const nativeCurrency = {
+    ethereum: { name: 'Ether',  symbol: 'ETH', decimals: 18 },
+    arbitrum: { name: 'Ether',  symbol: 'ETH', decimals: 18 },
+    optimism: { name: 'Ether',  symbol: 'ETH', decimals: 18 },
+    base:     { name: 'Ether',  symbol: 'ETH', decimals: 18 },
+    polygon:  { name: 'POL',    symbol: 'POL', decimals: 18 },
+    bnb:      { name: 'BNB',    symbol: 'BNB', decimals: 18 },
+  }[chain];
+  const blockExplorerUrls = {
+    ethereum: ['https://etherscan.io'],
+    arbitrum: ['https://arbiscan.io'],
+    optimism: ['https://optimistic.etherscan.io'],
+    base:     ['https://basescan.org'],
+    polygon:  ['https://polygonscan.com'],
+    bnb:      ['https://bscscan.com'],
+  }[chain];
+  return {
+    rpcUrls,
+    chainName: cfg.name,
+    nativeCurrency,
+    blockExplorerUrls,
+  };
 }
 
 // =====================================================================
@@ -211,6 +367,8 @@ function isRetryableFeeError(err) {
   if (msg.includes('receipt[')) return false;
   if (msg.includes('sweepid required')) return false;
   if (msg.includes('clientid required')) return false;
+  if (msg.includes('not committed')) return false;
+  if (msg.includes('different client')) return false;
   // Anything else (fetch errors, timeouts, 5xx) is treated as retryable.
   return true;
 }
@@ -243,6 +401,48 @@ async function recordFeeWithRetry(payload, logLine) {
         logLine(`  Fee record attempt ${attempt}/${FEE_RECORD_MAX_ATTEMPTS} failed (${scrubSecret(e.message)}); retrying in ${backoff}ms`);
       }
       await new Promise((r) => setTimeout(r, backoff));
+    }
+  }
+
+  throw lastError;
+}
+
+// =====================================================================
+// SWEEP COMMIT RETRY
+// =====================================================================
+//
+// The worker is idempotent on (sweepId, destination), so retrying on a
+// transient error is safe: the second call either succeeds or returns
+// `alreadyCommitted: true`. 4xx errors (validation, tampering) are
+// permanent and bail immediately.
+// =====================================================================
+
+async function commitSweepWithRetry(sweepId, userDestination, logLine) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= COMMIT_MAX_ATTEMPTS; attempt++) {
+    try {
+      return await commitSweep(sweepId, userDestination);
+    } catch (e) {
+      lastError = e;
+
+      const msg = String(e?.message || '').toLowerCase();
+      const statusMatch = msg.match(/http (\d{3})/);
+      if (statusMatch) {
+        const status = parseInt(statusMatch[1], 10);
+        if (status >= 400 && status < 500 && status !== 429) throw e;
+      }
+      // Worker-side validation errors are permanent too.
+      if (msg.includes('clientid required') || msg.includes('sweepid required') || msg.includes('userdestination')) {
+        throw e;
+      }
+
+      if (attempt === COMMIT_MAX_ATTEMPTS) throw e;
+
+      if (logLine) {
+        logLine(`  Commit attempt ${attempt}/${COMMIT_MAX_ATTEMPTS} failed (${scrubSecret(e.message)}); retrying...`);
+      }
+      await new Promise((r) => setTimeout(r, COMMIT_BACKOFF_MS));
     }
   }
 
@@ -639,7 +839,7 @@ async function runSweep(live) {
 
   // Stable ID for this sweep attempt. Used as the idempotency key when
   // recording the fee on the worker, so retrying recordFee won't
-  // create duplicate entries.
+  // create duplicate entries. Also the key for the sweep commit.
   const sweepId = crypto.randomUUID();
 
   const inputs = readInputs();
@@ -665,13 +865,21 @@ async function runSweep(live) {
     }
     if (balance < 1) { logLine('ERROR: still no credits after payment.'); return; }
 
-    const confirm = prompt(
-      `This live sweep will consume 1 credit (you have ${balance}).\n` +
-      `If any EVM wallet needs gas, a small sponsorship fee applies (from $0.01).\n\n` +
-      `Type LIVE_SWEEP_NOW to confirm:`
-    );
-    if (confirm !== 'LIVE_SWEEP_NOW') { logLine('Live sweep cancelled.'); return; }
+    // Commit the sweep's destination to the worker before consuming a
+    // credit. This is the authoritative record of where the user wants
+    // funds sent — /fee/record will refuse the sweep if no commit
+    // exists, and will overwrite any client-supplied destination with
+    // the committed one.
+    try {
+      await commitSweepWithRetry(sweepId, destinations.evm, logLine);
+      logLine(`  Sweep destination committed: ${destinations.evm}`);
+    } catch (err) {
+      logLine(`ERROR: could not commit sweep to worker: ${scrubSecret(err.message)}`);
+      return;
+    }
 
+    // The button click in Live mode is the confirmation — no
+    // prompt() blocking dialog. Credit is consumed immediately.
     try {
       const newBalance = await consumeCredit('sweep');
       logLine(`Credit consumed. Remaining: ${newBalance}`);
@@ -726,7 +934,7 @@ async function runSweep(live) {
             } else if (state.walletType === 'extension') {
               const cfg = EVM_CHAINS[chain];
               try {
-                await state.wallet.switchChain(cfg.chainId);
+                await state.wallet.switchChain(cfg.chainId, chainExtraParams(chain));
               } catch (e) {
                 logLine(`  SKIPPED: could not switch wallet to ${chain} — ${scrubSecret(e.message)}`);
                 chainSkipReasons[chain] = `wallet cannot switch to ${chain}`;
@@ -734,8 +942,41 @@ async function runSweep(live) {
               }
               await new Promise((r) => setTimeout(r, 300));
               signer = await state.wallet.getEthersSigner(provider);
+            } else if (state.walletType === 'walletconnect') {
+              const cfg = EVM_CHAINS[chain];
+              try {
+                await state.wallet.switchChain(cfg.chainId, chainExtraParams(chain));
+              } catch (e) {
+                logLine(`  SKIPPED: could not switch WalletConnect to ${chain} — ${scrubSecret(e.message)}`);
+                chainSkipReasons[chain] = `walletconnect cannot switch to ${chain}`;
+                continue;
+              }
+              // WC sessions need a moment for the chainChanged event
+              // to propagate through the ethers.BrowserProvider wrapper.
+              await new Promise((r) => setTimeout(r, 500));
+              signer = await state.wallet.getEthersSigner(provider);
             } else {
               signer = await state.wallet.getEthersSigner(provider);
+            }
+
+            // Verify chain and signer before doing anything else. This
+            // runs for every wallet type — mnemonic, extension, WC,
+            // hardware — so a stale RPC, a wallet that lied about
+            // switching, or an account change in the extension is
+            // caught here, not after a bad broadcast.
+            //
+            // Pass `address` so we also confirm the signer is still on
+            // the account we connected with.
+            try {
+              await verifySignerChain(chain, provider, signer, address);
+            } catch (e) {
+              if (e instanceof ChainVerifyError) {
+                logLine(`  SKIPPED: ${scrubSecret(e.message)}`);
+                chainSkipReasons[chain] = `chain verification failed on ${chain}`;
+                continue;
+              }
+              // Unexpected error — bubble up to the outer catch.
+              throw e;
             }
 
             const preview = state.previews.evm.find((p) => p.address === address && p.chain === chain);

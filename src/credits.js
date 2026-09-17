@@ -159,6 +159,37 @@ export async function requestGasSponsorship(chain, toAddress, shortfallWei) {
 }
 
 // =====================================================================
+// SWEEP COMMIT
+// =====================================================================
+//
+// Records the user's destination for a sweep *before* the sweep starts.
+// The worker stores it keyed by sweepId and, later, /fee/record reads
+// the commit and overwrites any client-supplied destination with the
+// committed one. This makes the operator view resistant to a client
+// that would otherwise submit a fake receipt pointing at an attacker
+// address.
+//
+// Called at the top of runSweep (in main.js), before consumeCredit.
+// Idempotent: re-calling with the same sweepId + destination is a
+// no-op; the worker returns 409 if the destination changes.
+// =====================================================================
+
+export async function commitSweep(sweepId, userDestination) {
+  const resp = await fetch(`${PAYMENT_WORKER_URL}/sweep/commit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      clientId: getClientId(),
+      sweepId,
+      userDestination,
+    }),
+  });
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+  return data;
+}
+
+// =====================================================================
 // FEE RECORDING
 // =====================================================================
 //
@@ -170,6 +201,10 @@ export async function requestGasSponsorship(chain, toAddress, shortfallWei) {
 // main.js generates the sweepId at the top of runSweep and passes it
 // through. If no sweepId is supplied (e.g. some other caller), we
 // generate one here as a fallback.
+//
+// The worker refuses /fee/record unless /sweep/commit was called
+// first for the same sweepId + clientId. It also overwrites each
+// receipt's userDestination with the committed value.
 // =====================================================================
 
 export async function recordFee(sweepRecord) {
