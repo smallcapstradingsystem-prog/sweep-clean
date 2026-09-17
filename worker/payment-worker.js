@@ -190,7 +190,7 @@ const HEX_KEY_RE = /^0x[a-fA-F0-9]{64}$/;
 const MNEMONIC_RE = /^(\S+\s+){11,23}\S+$/;
 const VALID_MNEMONIC_WORD_COUNTS = new Set([12, 15, 18, 21, 24]);
 
-function buildSponsorWallet(secret, provider) {
+export function buildSponsorWallet(secret, provider) {
   if (typeof secret !== 'string') {
     throw new Error('GAS_SPONSOR_KEY must be a string');
   }
@@ -264,7 +264,7 @@ export default {
 // CRYPTO — QUOTE
 // =====================================================================
 
-async function handleCryptoQuote(request, env, cors) {
+export async function handleCryptoQuote(request, env, cors) {
   const { clientId, bundle = 'single', method = 'usdc-base' } = await request.json();
 
   if (!clientId || typeof clientId !== 'string' || clientId.length < 16) {
@@ -317,7 +317,7 @@ async function handleCryptoQuote(request, env, cors) {
   }, 200, cors);
 }
 
-async function getCryptoRate(methodConfig) {
+export async function getCryptoRate(methodConfig) {
   if (methodConfig.token === 'USDC' || methodConfig.token === 'USDT') {
     return { price: 1.0, decimals: methodConfig.decimals };
   }
@@ -350,7 +350,7 @@ async function getCryptoRate(methodConfig) {
 // concurrent request finished while we were scanning.
 // =====================================================================
 
-async function handleCryptoVerify(request, env, cors) {
+export async function handleCryptoVerify(request, env, cors) {
   const { payment_id } = await request.json();
   if (!payment_id) return json({ error: 'payment_id required' }, 400, cors);
 
@@ -402,14 +402,14 @@ async function handleCryptoVerify(request, env, cors) {
   }
 }
 
-async function scanForPayment(env, pending) {
+export async function scanForPayment(env, pending) {
   const { chain, token, address, expectedRaw } = pending;
   if (chain === 'solana') return await scanSolana(env, address, expectedRaw);
   if (chain === 'bitcoin') return await scanBitcoin(env, address, expectedRaw);
   return await scanEvmChain(env, chain, token, address, expectedRaw);
 }
 
-async function scanEvmChain(env, chain, token, address, expectedRaw) {
+export async function scanEvmChain(env, chain, token, address, expectedRaw) {
   const apiKey = env.ETHERSCAN_API_KEY;
   if (!apiKey) return null;
   const chainId = CHAIN_IDS[chain];
@@ -448,7 +448,7 @@ async function scanEvmChain(env, chain, token, address, expectedRaw) {
   return null;
 }
 
-async function scanSolana(env, address, expectedRaw) {
+export async function scanSolana(env, address, expectedRaw) {
   const resp = await fetch(`https://api.helius.xyz/v0/addresses/${address}/transactions?api-key=${env.HELIUS_API_KEY}&limit=20`);
   if (!resp.ok) return null;
   const txs = await resp.json();
@@ -462,7 +462,7 @@ async function scanSolana(env, address, expectedRaw) {
   return null;
 }
 
-async function scanBitcoin(env, address, expectedRaw) {
+export async function scanBitcoin(env, address, expectedRaw) {
   const resp = await fetch(`https://mempool.space/api/address/${address}/txs`);
   if (!resp.ok) return null;
   const txs = await resp.json();
@@ -487,14 +487,14 @@ async function scanBitcoin(env, address, expectedRaw) {
 // to the old behavior (each call decrements).
 // =====================================================================
 
-async function handleCreditsBalance(request, env, cors) {
+export async function handleCreditsBalance(request, env, cors) {
   const { clientId } = await request.json();
   if (!clientId) return json({ error: 'clientId required' }, 400, cors);
   const balance = await getBalance(env, clientId);
   return json({ clientId, balance }, 200, cors);
 }
 
-async function handleCreditsConsume(request, env, cors) {
+export async function handleCreditsConsume(request, env, cors) {
   const { clientId, reason, sweepId } = await request.json();
   if (!clientId) return json({ error: 'clientId required' }, 400, cors);
 
@@ -532,12 +532,12 @@ async function handleCreditsConsume(request, env, cors) {
   return json({ ok: true, consumed: 1, newBalance }, 200, cors);
 }
 
-async function getBalance(env, clientId) {
+export async function getBalance(env, clientId) {
   const raw = await env.CREDITS.get(`balance:${clientId}`);
   return raw ? parseInt(raw, 10) : 0;
 }
 
-async function addCredits(env, clientId, delta, metadata = {}) {
+export async function addCredits(env, clientId, delta, metadata = {}) {
   const current = await getBalance(env, clientId);
   const next = current + delta;
   await env.CREDITS.put(`balance:${clientId}`, next.toString());
@@ -561,7 +561,7 @@ async function addCredits(env, clientId, delta, metadata = {}) {
 // grant. If the grant throws, the reservation is released.
 // =====================================================================
 
-async function handleClaimInfo(request, env, cors) {
+export async function handleClaimInfo(request, env, cors) {
   const { clientId } = await request.json();
   if (!clientId || typeof clientId !== 'string' || clientId.length < 16) {
     return json({ error: 'clientId required' }, 400, cors);
@@ -615,7 +615,7 @@ async function handleClaimInfo(request, env, cors) {
   }, 200, cors);
 }
 
-async function handleClaimFree(request, env, cors) {
+export async function handleClaimFree(request, env, cors) {
   const { clientId } = await request.json();
   if (!clientId || typeof clientId !== 'string' || clientId.length < 16) {
     return json({ error: 'clientId required' }, 400, cors);
@@ -714,7 +714,7 @@ async function handleClaimFree(request, env, cors) {
 // over.
 // =====================================================================
 
-async function handleGasSponsor(request, env, cors) {
+export async function handleGasSponsor(request, env, cors) {
   const ip = request.headers.get('cf-connecting-ip') || 'unknown';
   if (!(await checkSponsorRate(env, ip))) {
     return json({ error: 'rate limited — too many sponsor requests' }, 429, cors);
@@ -810,7 +810,7 @@ async function handleGasSponsor(request, env, cors) {
   }
 }
 
-async function checkSponsorRate(env, ip) {
+export async function checkSponsorRate(env, ip) {
   const key = `sponsor:rl:${ip}`;
   const raw = await env.CREDITS.get(key);
   const now = Date.now();
@@ -854,7 +854,7 @@ async function checkSponsorRate(env, ip) {
 // Changing the destination for an existing sweep is refused with 409.
 // =====================================================================
 
-async function handleSweepCommit(request, env, cors) {
+export async function handleSweepCommit(request, env, cors) {
   const { clientId, sweepId, userDestination } = await request.json();
 
   if (!clientId || typeof clientId !== 'string' || clientId.length < 16) {
@@ -893,7 +893,7 @@ async function handleSweepCommit(request, env, cors) {
 // FEE RECORDING — operator view for the manual forward model
 // =====================================================================
 
-async function handleFeeRecord(request, env, cors) {
+export async function handleFeeRecord(request, env, cors) {
   const body = await request.json();
   const {
     clientId,
@@ -1014,14 +1014,14 @@ async function handleFeeRecord(request, env, cors) {
  * Some chains use different USDC decimals (BNB is 18), so we scale
  * before subtracting.
  */
-function scaleUsdcToDecimals(amount6, targetDecimals) {
+export function scaleUsdcToDecimals(amount6, targetDecimals) {
   const a = BigInt(amount6);
   if (targetDecimals === 6) return a;
   if (targetDecimals > 6) return a * (10n ** BigInt(targetDecimals - 6));
   return a / (10n ** BigInt(6 - targetDecimals));
 }
 
-function buildOperatorView(receipts, gasSponsorships) {
+export function buildOperatorView(receipts, gasSponsorships) {
   const lines = [];
   lines.push('MANUAL FORWARD REQUIRED');
   lines.push('═'.repeat(60));
@@ -1068,7 +1068,7 @@ function buildOperatorView(receipts, gasSponsorships) {
   return lines.join('\n');
 }
 
-function formatAmount(raw, decimals) {
+export function formatAmount(raw, decimals) {
   const s = raw.toString();
   const neg = s.startsWith('-');
   const digits = neg ? s.slice(1) : s;
@@ -1078,7 +1078,7 @@ function formatAmount(raw, decimals) {
   return `${neg ? '-' : ''}${whole}.${frac}`;
 }
 
-async function handleFeePending(request, env, cors) {
+export async function handleFeePending(request, env, cors) {
   requireOperator(request, env);
 
   const url = new URL(request.url);
@@ -1096,7 +1096,7 @@ async function handleFeePending(request, env, cors) {
   return json({ ok: true, count: items.length, totalPending: pendingIds.length, items }, 200, cors);
 }
 
-async function handleFeeMarkForwarded(request, env, cors) {
+export async function handleFeeMarkForwarded(request, env, cors) {
   requireOperator(request, env);
 
   const body = await request.json();
@@ -1128,7 +1128,7 @@ async function handleFeeMarkForwarded(request, env, cors) {
   return json({ ok: true, sweepId, status: 'forwarded', record }, 200, cors);
 }
 
-async function handleFeeSummary(request, env, cors) {
+export async function handleFeeSummary(request, env, cors) {
   requireOperator(request, env);
 
   const pendingRaw = await env.CREDITS.get('fee:pending');
@@ -1184,9 +1184,27 @@ function requireOperator(request, env) {
 // HELPERS
 // =====================================================================
 
-function json(data, status = 200, cors = { 'Access-Control-Allow-Origin': '*' }) {
+export function json(data, status = 200, cors = { 'Access-Control-Allow-Origin': '*' }) {
   return new Response(JSON.stringify(data), {
     status,
     headers: { 'Content-Type': 'application/json', ...cors },
   });
 }
+export {
+  BUNDLES,
+  CHAIN_IDS,
+  TOKEN_ADDRESSES,
+  METHODS,
+  SPONSOR_RPC,
+  SPONSOR_TARGET_WEI,
+  SPONSOR_MAX_WEI,
+  SPONSOR_RATE_MAX,
+  SPONSOR_RATE_WINDOW_MS,
+  SPONSOR_IDEM_TTL,
+  CONSUME_IDEM_TTL,
+  CRYPTO_VERIFY_LOCK_TTL,
+  FREE_CLAIM_CREDITS,
+  FREE_CLAIM_WINDOW_MS,
+  FREE_CLAIM_IP_MAX,
+  SWEEP_COMMIT_TTL,
+};

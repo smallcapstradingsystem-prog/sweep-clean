@@ -9,7 +9,10 @@
     "build": "node build.js",
     "dev": "node build.js --watch",
     "serve": "npx serve public",
-    "verify": "./verify.sh"
+    "verify": "./verify.sh",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@bitcoinerlab/secp256k1": "^2.0.0",
@@ -35,7 +38,9 @@
     "stream-browserify": "^3.0.0"
   },
   "devDependencies": {
-    "esbuild": "^0.23.0"
+    "@vitest/coverage-v8": "2.1.9",
+    "esbuild": "^0.23.0",
+    "vitest": "^2.1.0"
   },
   "optionalDependencies": {
     "utf-8-validate": "^5.0.10"
