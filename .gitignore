@@ -8,4 +8,4 @@ public/releases/
 .env
 .env.local
 .wrangler/
-*.log
+*.logcoverage/
