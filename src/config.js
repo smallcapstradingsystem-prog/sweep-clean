@@ -59,14 +59,41 @@ export function operatorFee(amountRaw) {
 // GAS SPONSORSHIP FEE (deducted from user's 90%)
 // =====================================================================
 //
-// Rule:
-//   - If actual gas cost < $1.00, charge $1.00 flat
-//   - If actual gas cost >= $1.00, charge 2× actual
+// Tiered multiplier on actual gas cost:
+//   - actual < $0.05  → 50× actual
+//   - actual < $0.10  → 10× actual
+//   - actual < $0.25  →  5× actual
+//   - actual < $0.50  →  4× actual
+//   - actual ≥ $0.50  →  2× actual
+//
+// The 1-cent floor at the end ensures the fee is never $0 even when
+// the raw cost rounds to 0 (Base/Optimism/Arbitrum at quiet times).
+//
+// Paired with MIN_SPONSOR_FLOOR_USDC in main.js (currently 0.02), so
+// dust sweeps still run and are profitable for the operator.
 // =====================================================================
 
 export function computeSponsorshipFeeUsdCents(actualGasCostUsdCents) {
-  if (actualGasCostUsdCents < 100) return 100;
-  return actualGasCostUsdCents * 2;
+  const cost = Math.max(0, Math.ceil(actualGasCostUsdCents));
+
+  let feeCents;
+  if (cost < 5) {
+    feeCents = cost * 50;
+  } else if (cost < 10) {
+    feeCents = cost * 10;
+  } else if (cost < 25) {
+    feeCents = cost * 5;
+  } else if (cost < 50) {
+    feeCents = cost * 4;
+  } else {
+    feeCents = cost * 2;
+  }
+
+  // 1-cent floor — keeps the fee visible and non-zero on cheap chains
+  // where the raw cost rounds to 0.
+  if (feeCents < 1) feeCents = 1;
+
+  return feeCents;
 }
 
 export function usdCentsToUsdcRaw(cents) {

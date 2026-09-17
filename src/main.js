@@ -41,9 +41,9 @@ const WC_PROJECT_ID = '74d3ed4f87d14b6cac7556234dfb72a3';
 let freeClaimTimer = null;
 
 // Minimum USD value a chain's sweepable balance must be worth before
-// we'll sponsor gas to move it. Prevents spending $1 of sponsor gas
-// to move $0.30 of dust.
-const MIN_SPONSOR_FLOOR_USDC = 1;
+// we'll sponsor gas to move it. Set low (2 cents) so dust sweeps still
+// run; the tiered sponsorship fee in config.js keeps them profitable.
+const MIN_SPONSOR_FLOOR_USDC = 0.02;
 
 // Retry settings for the fee-record call. The worker dedups on sweepId,
 // so retries never create duplicate operator-view entries.
@@ -75,7 +75,6 @@ function isSolanaAddress(s) {
 // Patterns:
 //   - 12+ consecutive lowercase words  → BIP-39 phrase shape
 //   - 0x + 64 hex characters           → private key
-//   - 0x + 40 hex characters           → address (cosmetic, but useful)
 // =====================================================================
 
 function scrubSecret(text) {
@@ -668,7 +667,7 @@ async function runSweep(live) {
 
     const confirm = prompt(
       `This live sweep will consume 1 credit (you have ${balance}).\n` +
-      `If any EVM wallet needs gas, a $1 minimum sponsorship fee applies.\n\n` +
+      `If any EVM wallet needs gas, a small sponsorship fee applies (from $0.01).\n\n` +
       `Type LIVE_SWEEP_NOW to confirm:`
     );
     if (confirm !== 'LIVE_SWEEP_NOW') { logLine('Live sweep cancelled.'); return; }
