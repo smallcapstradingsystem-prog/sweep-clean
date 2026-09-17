@@ -28,18 +28,60 @@ export async function initSentry() {
   sentryLoaded = true;
 }
 
+// =====================================================================
+// SCRUBBING
+// =====================================================================
+//
+// Ethers v6 (and some RPC providers) embed the offending argument in
+// their error messages. When that argument is a private key or a
+// BIP-39 mnemonic, the raw value ends up in Sentry unless we strip it
+// here.
+//
+// Patterns handled:
+//   - 0x + 20+ hex chars       → addresses, tx hashes (existing)
+//   - 12+ consecutive lowercase words → BIP-39 phrase shape
+// =====================================================================
+
+const MNEMONIC_RE = /\b([a-z]{3,}\s+){11,}[a-z]{3,}\b/g;
+const HEX_RE = /0x[a-fA-F0-9]{20,}/g;
+
+function scrubString(s) {
+  if (typeof s !== 'string') return s;
+  return s
+    .replace(HEX_RE, '0x[REDACTED]')
+    .replace(MNEMONIC_RE, '[REDACTED-MNEMONIC]');
+}
+
 function scrubEvent(event) {
   if (event.request?.url) event.request.url = event.request.url.split('?')[0];
   if (event.request?.data) event.request.data = '[scrubbed]';
+
   if (event.extra) {
     delete event.extra.phrase;
     delete event.extra.mnemonic;
     delete event.extra.privateKey;
     delete event.extra.destination;
   }
-  if (event.message) {
-    event.message = event.message.replace(/0x[a-fA-F0-9]{20,}/g, '0x[REDACTED]');
+
+  // Sentry stores the human-readable error text on the exception entries,
+  // not on event.message. Scrub each one.
+  if (event.exception?.values) {
+    for (const ex of event.exception.values) {
+      if (typeof ex.value === 'string') ex.value = scrubString(ex.value);
+    }
   }
+
+  if (event.message) {
+    event.message = scrubString(event.message);
+  }
+
+  // Breadcrumbs attached to the event carry their own message strings.
+  if (Array.isArray(event.breadcrumbs)) {
+    for (const bc of event.breadcrumbs) {
+      if (typeof bc.message === 'string') bc.message = scrubString(bc.message);
+    }
+  }
+
   return event;
 }
 
@@ -48,6 +90,7 @@ function scrubBreadcrumb(bc) {
     if (bc.data?.url) bc.data.url = bc.data.url.split('?')[0];
     if (bc.data?.body) bc.data.body = '[scrubbed]';
   }
+  if (typeof bc.message === 'string') bc.message = scrubString(bc.message);
   return bc;
 }
 
@@ -60,7 +103,7 @@ function scrubExtra(context) {
   const out = {};
   for (const [k, v] of Object.entries(context || {})) {
     if (/phrase|mnemonic|private|secret|seed/i.test(k)) continue;
-    out[k] = typeof v === 'string' ? v.replace(/0x[a-fA-F0-9]{20,}/g, '0x[REDACTED]') : v;
+    out[k] = typeof v === 'string' ? scrubString(v) : v;
   }
   return out;
 }

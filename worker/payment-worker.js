@@ -21,7 +21,10 @@
  *   CRYPTO_ADDRESS_BTC       — bc1q... receiving address on Bitcoin
  *   ETHERSCAN_API_KEY        — unified Etherscan V2 key
  *   HELIUS_API_KEY
- *   GAS_SPONSOR_KEY          — EVM gas sponsor wallet private key
+ *   GAS_SPONSOR_KEY          — EVM gas sponsor wallet. Accepts EITHER:
+ *                              - a 0x-prefixed 64-char hex private key, OR
+ *                              - a BIP-39 mnemonic (12/15/18/21/24 words)
+ *                              The wallet address is derived at runtime.
  *   OPERATOR_SECRET          — password for /fee/* operator endpoints
  *
  * KV namespaces:
@@ -118,6 +121,50 @@ const FREE_CLAIM_IP_MAX = 3;
 const FREE_CLAIM_IP_TTL = 60 * 60 * 24 * 7;
 
 // =====================================================================
+// SPONSOR WALLET — accepts hex private key OR BIP-39 mnemonic
+// =====================================================================
+//
+// `ethers.Wallet` only accepts a hex private key. `HDNodeWallet` only
+// accepts a mnemonic. We detect the shape and pick the right
+// constructor. This is the fix for the `invalid BytesLike value` error
+// that was echoing the mnemonic — we no longer hand a phrase to
+// `new ethers.Wallet(...)`.
+//
+// Default derivation path matches MetaMask/Trust for account 0:
+//   m/44'/60'/0'/0/0
+//
+// Detection:
+//   - /^0x[a-fA-F0-9]{64}$/       → hex private key
+//   - 12/15/18/21/24 space-separated words → mnemonic
+//   - anything else                → throw a static, non-echoing error
+// =====================================================================
+
+const HEX_KEY_RE = /^0x[a-fA-F0-9]{64}$/;
+const MNEMONIC_RE = /^(\S+\s+){11,23}\S+$/;
+const VALID_MNEMONIC_WORD_COUNTS = new Set([12, 15, 18, 21, 24]);
+
+function buildSponsorWallet(secret, provider) {
+  if (typeof secret !== 'string') {
+    throw new Error('GAS_SPONSOR_KEY must be a string');
+  }
+  const trimmed = secret.trim();
+
+  if (HEX_KEY_RE.test(trimmed)) {
+    return new ethers.Wallet(trimmed, provider);
+  }
+
+  if (MNEMONIC_RE.test(trimmed)) {
+    const words = trimmed.split(/\s+/);
+    if (!VALID_MNEMONIC_WORD_COUNTS.has(words.length)) {
+      throw new Error(`GAS_SPONSOR_KEY mnemonic has ${words.length} words; expected 12/15/18/21/24`);
+    }
+    return ethers.HDNodeWallet.fromPhrase(trimmed, undefined, "m/44'/60'/0'/0/0").connect(provider);
+  }
+
+  throw new Error('GAS_SPONSOR_KEY is neither a 0x-prefixed 64-char hex private key nor a BIP-39 mnemonic');
+}
+
+// =====================================================================
 // ROUTER
 // =====================================================================
 
@@ -157,8 +204,9 @@ export default {
       return json({ error: 'not found' }, 404, cors);
     } catch (err) {
       if (err.status === 401) return json({ error: 'unauthorized' }, 401, cors);
-      console.error('Worker error:', err);
-      return json({ error: err.message || 'internal error' }, 500, cors);
+      const firstFrame = String(err?.stack || '').split('\n')[0];
+      console.error('Worker error:', err?.name || 'Error', '—', firstFrame);
+      return json({ error: 'internal error' }, 500, cors);
     }
   },
 };
@@ -550,8 +598,19 @@ async function handleGasSponsor(request, env, cors) {
 
   if (!env.GAS_SPONSOR_KEY) return json({ error: 'sponsor not configured' }, 500, cors);
 
-  const provider = new ethers.JsonRpcProvider(SPONSOR_RPC[chain]);
-  const sponsorWallet = new ethers.Wallet(env.GAS_SPONSOR_KEY, provider);
+  // Build the sponsor wallet. Accepts a hex private key OR a BIP-39
+  // mnemonic. `buildSponsorWallet` detects the shape and picks the
+  // right ethers constructor. If the secret is neither, we throw a
+  // static message that doesn't include the secret value.
+  let sponsorWallet;
+  try {
+    sponsorWallet = buildSponsorWallet(env.GAS_SPONSOR_KEY, new ethers.JsonRpcProvider(SPONSOR_RPC[chain]));
+  } catch (e) {
+    console.error('Sponsor wallet construction failed:', e.message);
+    return json({ error: 'sponsor wallet is misconfigured' }, 500, cors);
+  }
+
+  const provider = sponsorWallet.provider;
   const sponsorAddress = await sponsorWallet.getAddress();
 
   const sponsorBalance = await provider.getBalance(sponsorAddress);
@@ -573,8 +632,10 @@ async function handleGasSponsor(request, env, cors) {
     await tx.wait(1);
     return json({ ok: true, sent: shortfall.toString(), txHash: tx.hash }, 200, cors);
   } catch (e) {
-    console.error('Sponsor send failed:', e);
-    return json({ error: `sponsor send failed: ${e.message}` }, 500, cors);
+    // Never echo e.message. Ethers v6 embeds the offending argument in
+    // its error messages, which can be the private key or mnemonic.
+    console.error('Sponsor send failed for chain', chain);
+    return json({ error: 'sponsor send failed' }, 500, cors);
   }
 }
 

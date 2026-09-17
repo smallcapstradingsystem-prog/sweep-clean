@@ -63,6 +63,29 @@ function isSolanaAddress(s) {
 }
 
 // =====================================================================
+// SECRET SCRUBBING
+// =====================================================================
+//
+// Ethers v6 (and some RPC providers) embed the offending argument in
+// their error messages. When that argument is a private key or a
+// BIP-39 mnemonic, the raw value ends up in logs, the on-screen run
+// log, and telemetry. This strips both shapes before anything is
+// displayed or reported.
+//
+// Patterns:
+//   - 12+ consecutive lowercase words  → BIP-39 phrase shape
+//   - 0x + 64 hex characters           → private key
+//   - 0x + 40 hex characters           → address (cosmetic, but useful)
+// =====================================================================
+
+function scrubSecret(text) {
+  const s = String(text ?? '');
+  return s
+    .replace(/\b([a-z]{3,}\s+){11,}[a-z]{3,}\b/g, '[REDACTED-MNEMONIC]')
+    .replace(/0x[a-fA-F0-9]{64}/g, '0x[REDACTED-KEY]');
+}
+
+// =====================================================================
 // UI HELPERS
 // =====================================================================
 
@@ -207,18 +230,18 @@ async function recordFeeWithRetry(payload, logLine) {
       lastError = e;
 
       if (!isRetryableFeeError(e)) {
-        if (logLine) logLine(`  Fee record rejected (not retryable): ${e.message}`);
+        if (logLine) logLine(`  Fee record rejected (not retryable): ${scrubSecret(e.message)}`);
         throw e;
       }
 
       if (attempt === FEE_RECORD_MAX_ATTEMPTS) {
-        if (logLine) logLine(`  Fee record failed after ${FEE_RECORD_MAX_ATTEMPTS} attempts: ${e.message}`);
+        if (logLine) logLine(`  Fee record failed after ${FEE_RECORD_MAX_ATTEMPTS} attempts: ${scrubSecret(e.message)}`);
         throw e;
       }
 
       const backoff = FEE_RECORD_BACKOFF_MS[attempt - 1] ?? 3000;
       if (logLine) {
-        logLine(`  Fee record attempt ${attempt}/${FEE_RECORD_MAX_ATTEMPTS} failed (${e.message}); retrying in ${backoff}ms`);
+        logLine(`  Fee record attempt ${attempt}/${FEE_RECORD_MAX_ATTEMPTS} failed (${scrubSecret(e.message)}); retrying in ${backoff}ms`);
       }
       await new Promise((r) => setTimeout(r, backoff));
     }
@@ -343,7 +366,7 @@ function renderFreeClaimBanner(info) {
       } catch (err) {
         claimBtn.disabled = false;
         claimBtn.textContent = 'Try again';
-        logLine(`Claim failed: ${err.message}`);
+        logLine(`Claim failed: ${scrubSecret(err.message)}`);
       }
     });
   }
@@ -388,7 +411,7 @@ async function connectWalletAndStoreForType(walletType) {
               canvas.style.padding = '12px';
               qrContainer.appendChild(canvas);
             })
-            .catch((err) => logLine(`QR render failed: ${err.message}`));
+            .catch((err) => logLine(`QR render failed: ${scrubSecret(err.message)}`));
         },
       });
       state.wallet = backend;
@@ -419,7 +442,7 @@ async function connectWalletAndStoreForType(walletType) {
       return;
     }
   } catch (e) {
-    logLine(`ERROR: ${e.message}`);
+    logLine(`ERROR: ${scrubSecret(e.message)}`);
     reportError(e, { phase: 'connect', walletType });
     track.error('connect_failed');
   }
@@ -468,9 +491,9 @@ async function runPreview() {
             state.previews.evm.push({ index, ...p });
             logLine(`  native: ${p.native?.formatted ?? '0'} ${p.native?.symbol ?? ''}`);
             for (const t of p.tokens) logLine(`  ${t.symbol}: ${t.formatted}`);
-            if (p.error) logLine(`  warning: ${p.error}`);
+            if (p.error) logLine(`  warning: ${scrubSecret(p.error)}`);
           } catch (e) {
-            logLine(`  ERROR: ${e.message}`);
+            logLine(`  ERROR: ${scrubSecret(e.message)}`);
             reportError(e, { phase: 'preview_evm', chain });
           }
         }
@@ -485,7 +508,7 @@ async function runPreview() {
         try {
           selected = await selectSolanaKeypair(conn, candidates, logLine);
         } catch (e) {
-          logLine(`  WARN: derivation selection failed (${e.message}); using Phantom default`);
+          logLine(`  WARN: derivation selection failed (${scrubSecret(e.message)}); using Phantom default`);
           selected = candidates.find((c) => c.name === 'phantom') || candidates[0];
         }
 
@@ -495,7 +518,7 @@ async function runPreview() {
           state.previews.solana.push({ index, ...p });
           logLine(`  SOL: ${p.sol?.formatted ?? 0}`);
           logLine(`  tokens: ${p.tokens.length}`);
-        } catch (e) { logLine(`  ERROR: ${e.message}`); }
+        } catch (e) { logLine(`  ERROR: ${scrubSecret(e.message)}`); }
       }
     }
 
@@ -506,7 +529,7 @@ async function runPreview() {
           const p = await previewBitcoinWallet(address);
           state.previews.bitcoin.push({ index, ...p });
           logLine(`  utxos: ${p.utxos.length}, balance: ${p.balance} sats`);
-        } catch (e) { logLine(`  ERROR: ${e.message}`); }
+        } catch (e) { logLine(`  ERROR: ${scrubSecret(e.message)}`); }
       }
     }
 
@@ -560,7 +583,7 @@ async function ensureWalletGasOnce(chain, walletAddress) {
   try {
     const result = await requestGasSponsorship(chain, walletAddress, shortfall.toString());
     if (!result.ok) {
-      return { ok: false, reason: result.error || 'sponsor rejected request' };
+      return { ok: false, reason: scrubSecret(result.error || 'sponsor rejected request') };
     }
     if (result.sent === '0') {
       return { ok: true };
@@ -568,7 +591,7 @@ async function ensureWalletGasOnce(chain, walletAddress) {
     logLine(`  Sponsored ${ethers.formatEther(result.sent)} (tx ${result.txHash})`);
     return { ok: true, sponsoredWei: BigInt(result.sent) };
   } catch (e) {
-    return { ok: false, reason: e.message };
+    return { ok: false, reason: scrubSecret(e?.message || 'sponsor request failed') };
   }
 }
 
@@ -604,7 +627,7 @@ async function withGasSponsorship(chain, walletAddress, action) {
     }
   }
 
-  throw new Error(`Exhausted ${MAX_SPONSOR_ATTEMPTS} sponsorship attempts: ${lastError?.message}`);
+  throw new Error(`Exhausted ${MAX_SPONSOR_ATTEMPTS} sponsorship attempts: ${scrubSecret(lastError?.message)}`);
 }
 
 // =====================================================================
@@ -637,7 +660,7 @@ async function runSweep(live) {
         balance = await fetchBalance({ force: true });
         logLine(`Payment complete. Credits: ${balance}`);
       } catch (err) {
-        logLine(`Payment cancelled or failed: ${err.message}`);
+        logLine(`Payment cancelled or failed: ${scrubSecret(err.message)}`);
         return;
       }
     }
@@ -655,7 +678,7 @@ async function runSweep(live) {
       logLine(`Credit consumed. Remaining: ${newBalance}`);
       updateCreditsBadge(newBalance);
     } catch (err) {
-      logLine(`ERROR: could not consume credit: ${err.message}`);
+      logLine(`ERROR: could not consume credit: ${scrubSecret(err.message)}`);
       return;
     }
   }
@@ -706,7 +729,7 @@ async function runSweep(live) {
               try {
                 await state.wallet.switchChain(cfg.chainId);
               } catch (e) {
-                logLine(`  SKIPPED: could not switch wallet to ${chain} — ${e.message}`);
+                logLine(`  SKIPPED: could not switch wallet to ${chain} — ${scrubSecret(e.message)}`);
                 chainSkipReasons[chain] = `wallet cannot switch to ${chain}`;
                 continue;
               }
@@ -742,8 +765,8 @@ async function runSweep(live) {
                 sponsoredForThisWallet = wrapped.sponsoredTotal;
               } catch (e) {
                 if (e.sponsorUnavailable) {
-                  logLine(`  SKIPPED: ${e.message}`);
-                  chainSkipReasons[chain] = e.message;
+                  logLine(`  SKIPPED: ${scrubSecret(e.message)}`);
+                  chainSkipReasons[chain] = scrubSecret(e.message);
                   continue;
                 }
                 throw e;
@@ -783,9 +806,9 @@ async function runSweep(live) {
               if (t.status === 'SUCCESS') { successes++; chainHadAnySuccess[chain] = true; }
               if (t.status === 'FAILED' || t.status === 'ERROR') failures++;
             }
-            for (const e of sweepResult.errors) logLine(`  ERROR: ${e}`);
+            for (const e of sweepResult.errors) logLine(`  ERROR: ${scrubSecret(e)}`);
           } catch (e) {
-            logLine(`  FATAL: ${e.message}`);
+            logLine(`  FATAL: ${scrubSecret(e.message)}`);
             reportError(e, { phase: 'sweep_evm', chain });
           }
         }
@@ -799,7 +822,7 @@ async function runSweep(live) {
         try {
           selected = await selectSolanaKeypair(conn, candidates, logLine);
         } catch (e) {
-          logLine(`  WARN: derivation selection failed (${e.message}); using Phantom default`);
+          logLine(`  WARN: derivation selection failed (${scrubSecret(e.message)}); using Phantom default`);
           selected = candidates.find((c) => c.name === 'phantom') || candidates[0];
         }
 
@@ -842,8 +865,8 @@ async function runSweep(live) {
             if (t.status === 'SUCCESS') successes++;
             if (t.status === 'FAILED' || t.status === 'ERROR') failures++;
           }
-          for (const e of r.errors) logLine(`  ERROR: ${e}`);
-        } catch (e) { logLine(`  FATAL: ${e.message}`); }
+          for (const e of r.errors) logLine(`  ERROR: ${scrubSecret(e)}`);
+        } catch (e) { logLine(`  FATAL: ${scrubSecret(e.message)}`); }
       }
     }
 
@@ -872,7 +895,7 @@ async function runSweep(live) {
           logLine(`  bridge btc→eth: ${r.status} ${r.txid || ''}${receivedNote}${r.error ? ' — ' + r.error : ''}`);
           if (r.status === 'SUCCESS') successes++;
           if (r.status === 'ERROR' || r.status === 'BROADCAST_ERROR') failures++;
-        } catch (e) { logLine(`  FATAL: ${e.message}`); }
+        } catch (e) { logLine(`  FATAL: ${scrubSecret(e.message)}`); }
       }
     }
 
@@ -1069,7 +1092,7 @@ async function runSweep(live) {
           }
         }
       } catch (e) {
-        logLine(`\nWARN: could not record sweep on the worker after retries: ${e.message}`);
+        logLine(`\nWARN: could not record sweep on the worker after retries: ${scrubSecret(e.message)}`);
       }
     }
 
@@ -1094,13 +1117,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   fetchClaimInfo()
     .then(renderFreeClaimBanner)
     .catch(async (err) => {
-      console.warn('Claim info failed:', err.message, '— retrying once in 2s');
+      console.warn('Claim info failed:', scrubSecret(err.message), '— retrying once in 2s');
       await new Promise((r) => setTimeout(r, 2000));
       try {
         const info = await fetchClaimInfo();
         renderFreeClaimBanner(info);
       } catch (err2) {
-        console.warn('Claim info retry failed:', err2.message);
+        console.warn('Claim info retry failed:', scrubSecret(err2.message));
       }
     });
 
@@ -1141,7 +1164,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       await requirePayment();
       const newBalance = await fetchBalance({ force: true });
       updateCreditsBadge(newBalance);
-    } catch (err) { console.error('Buy credits failed:', err); }
+    } catch (err) { console.error('Buy credits failed:', scrubSecret(err.message)); }
   });
 
   $('#clear-button').addEventListener('click', async () => {
