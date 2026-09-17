@@ -741,10 +741,23 @@ async function runSweep(live) {
             const preview = state.previews.evm.find((p) => p.address === address && p.chain === chain);
             const tokens = preview?.tokens || [];
 
-            // Sponsorship floor: price the chain's sweepable balance
-            // and skip chains below the minimum sponsorship fee.
+            // Sponsorship gate (live only):
+            //   1. value <= 0        → nothing worth sweeping. Skip
+            //                          silently; do not print a floor
+            //                          message, do not fall through to
+            //                          the sponsor/sweep path.
+            //   2. 0 < value < floor → dust above zero but below the
+            //                          sponsor floor. Print the skip
+            //                          line and remember the chain.
+            //   3. value >= floor    → run the sweep.
             if (live) {
               const chainValueUsdc = await estimateChainValueUsdc(chain, preview);
+
+              if (chainValueUsdc <= 0) {
+                chainSkipReasons[chain] = `nothing to sweep on ${chain}`;
+                continue;
+              }
+
               if (chainValueUsdc < MIN_SPONSOR_FLOOR_USDC) {
                 logLine(`  SKIPPED: ${chain} value (~$${chainValueUsdc.toFixed(2)}) below $${MIN_SPONSOR_FLOOR_USDC} sponsorship floor`);
                 chainSkipReasons[chain] = `below sponsorship floor on ${chain}`;
