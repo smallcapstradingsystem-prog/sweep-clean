@@ -30,7 +30,7 @@
  *
  * KV namespaces:
  *   CREDITS             — balances, history, free-claim state, rate limits,
- *                         fee records, sweep commits
+ *                         fee records, sweep commits, idempotency keys
  *   PENDING_PAYMENTS    — crypto payment records
  */
 
@@ -131,6 +131,23 @@ const SPONSOR_MAX_WEI = {
 
 const SPONSOR_RATE_MAX = 20;
 const SPONSOR_RATE_WINDOW_MS = 10 * 60 * 1000;
+
+// Idempotency window for /gas/sponsor. Same (chain, toAddress) within
+// this window returns the prior send result without sending again.
+// 5 minutes is longer than any of these chains' confirmation time, so
+// a replayed request always sees the "already sent" branch, not a
+// duplicate send.
+const SPONSOR_IDEM_TTL = 60 * 5;
+
+// Idempotency window for /credits/consume. Same sweepId within this
+// window returns the already-consumed result without decrementing
+// again. 30 days matches the sweep-commit TTL.
+const CONSUME_IDEM_TTL = 60 * 60 * 24 * 30;
+
+// Lock TTL for /crypto/verify. Long enough to cover an Etherscan
+// lookup, short enough that a crashed request doesn't wedge the
+// payment for long.
+const CRYPTO_VERIFY_LOCK_TTL = 30;
 
 const FREE_CLAIM_CREDITS = 3;
 const FREE_CLAIM_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -319,6 +336,19 @@ async function getCryptoRate(methodConfig) {
 // =====================================================================
 // CRYPTO — VERIFY
 // =====================================================================
+//
+// Concurrency: two pollers hitting the endpoint at the same moment
+// could both pass the `pending.verified` check, both scan, both find
+// the tx, and both credit the account. A short-lived lock keyed by
+// payment_id prevents that.
+//
+// KV is eventually consistent and has no compare-and-swap, so this
+// lock is best-effort — but it narrows the race window from
+// "wherever the two requests happen to interleave" to "the
+// millisecond between get and put", which in practice is enough.
+// The double-check after acquiring the lock handles the case where a
+// concurrent request finished while we were scanning.
+// =====================================================================
 
 async function handleCryptoVerify(request, env, cors) {
   const { payment_id } = await request.json();
@@ -331,21 +361,45 @@ async function handleCryptoVerify(request, env, cors) {
   if (pending.verified) return json({ ok: true, alreadyVerified: true, credits: pending.credits }, 200, cors);
   if (new Date(pending.expiresAt) < new Date()) return json({ error: 'payment expired' }, 410, cors);
 
-  const found = await scanForPayment(env, pending);
-  if (!found) return json({ status: 'pending', message: 'No matching transaction found yet' }, 200, cors);
+  // Best-effort lock. If another request holds it, tell the caller to
+  // keep polling — they will, since /crypto/verify is called in a loop.
+  const lockKey = `crypto:lock:${payment_id}`;
+  const lock = await env.CREDITS.get(lockKey);
+  if (lock) {
+    return json({ status: 'pending', message: 'verification in progress' }, 200, cors);
+  }
+  await env.CREDITS.put(lockKey, '1', { expirationTtl: CRYPTO_VERIFY_LOCK_TTL });
 
-  const balance = await addCredits(env, pending.clientId, pending.credits, {
-    type: 'crypto', method: pending.method, chain: pending.chain,
-    token: pending.token, txHash: found.txHash, credits: pending.credits,
-  });
+  try {
+    const found = await scanForPayment(env, pending);
+    if (!found) return json({ status: 'pending', message: 'No matching transaction found yet' }, 200, cors);
 
-  pending.verified = true;
-  pending.txHash = found.txHash;
-  await env.PENDING_PAYMENTS.put(`crypto:${payment_id}`, JSON.stringify(pending), {
-    expirationTtl: 60 * 60 * 24 * 7,
-  });
+    // Re-read the pending record. Another request may have verified
+    // while we were scanning (and then released its own lock). If so,
+    // don't credit twice.
+    const refreshedRaw = await env.PENDING_PAYMENTS.get(`crypto:${payment_id}`);
+    if (refreshedRaw) {
+      const refreshed = JSON.parse(refreshedRaw);
+      if (refreshed.verified) {
+        return json({ ok: true, alreadyVerified: true, credits: refreshed.credits }, 200, cors);
+      }
+    }
 
-  return json({ ok: true, creditsAdded: pending.credits, newBalance: balance, txHash: found.txHash }, 200, cors);
+    const balance = await addCredits(env, pending.clientId, pending.credits, {
+      type: 'crypto', method: pending.method, chain: pending.chain,
+      token: pending.token, txHash: found.txHash, credits: pending.credits,
+    });
+
+    pending.verified = true;
+    pending.txHash = found.txHash;
+    await env.PENDING_PAYMENTS.put(`crypto:${payment_id}`, JSON.stringify(pending), {
+      expirationTtl: 60 * 60 * 24 * 7,
+    });
+
+    return json({ ok: true, creditsAdded: pending.credits, newBalance: balance, txHash: found.txHash }, 200, cors);
+  } finally {
+    await env.CREDITS.delete(lockKey).catch(() => {});
+  }
 }
 
 async function scanForPayment(env, pending) {
@@ -425,6 +479,13 @@ async function scanBitcoin(env, address, expectedRaw) {
 // =====================================================================
 // CREDITS
 // =====================================================================
+//
+// /credits/consume is idempotent on sweepId. If the client retries
+// after a network blip, the second call finds the prior result in KV
+// and returns it without decrementing again. sweepId is optional for
+// backwards compatibility — callers that don't send it fall through
+// to the old behavior (each call decrements).
+// =====================================================================
 
 async function handleCreditsBalance(request, env, cors) {
   const { clientId } = await request.json();
@@ -434,11 +495,40 @@ async function handleCreditsBalance(request, env, cors) {
 }
 
 async function handleCreditsConsume(request, env, cors) {
-  const { clientId, reason } = await request.json();
+  const { clientId, reason, sweepId } = await request.json();
   if (!clientId) return json({ error: 'clientId required' }, 400, cors);
+
+  // Idempotency: if a sweepId was supplied and we've already consumed
+  // for it, return the prior result. This is what makes the endpoint
+  // safe to retry.
+  if (sweepId && typeof sweepId === 'string' && sweepId.length >= 8) {
+    const idemKey = `consume:${sweepId}`;
+    const prior = await env.CREDITS.get(idemKey);
+    if (prior) {
+      try {
+        const parsed = JSON.parse(prior);
+        if (parsed.clientId === clientId) {
+          return json({
+            ok: true, consumed: 1, newBalance: parsed.newBalance, alreadyConsumed: true,
+          }, 200, cors);
+        }
+      } catch {
+        // Corrupt record — treat as not-yet-consumed and overwrite below.
+      }
+    }
+  }
+
   const balance = await getBalance(env, clientId);
   if (balance < 1) return json({ error: 'insufficient credits', balance }, 402, cors);
+
   const newBalance = await addCredits(env, clientId, -1, { type: 'consume', reason: reason || 'sweep' });
+
+  if (sweepId && typeof sweepId === 'string' && sweepId.length >= 8) {
+    await env.CREDITS.put(`consume:${sweepId}`, JSON.stringify({
+      clientId, newBalance, consumedAt: new Date().toISOString(),
+    }), { expirationTtl: CONSUME_IDEM_TTL });
+  }
+
   return json({ ok: true, consumed: 1, newBalance }, 200, cors);
 }
 
@@ -616,8 +706,12 @@ async function handleClaimFree(request, env, cors) {
 // real shortfall from SPONSOR_TARGET_WEI. This closes the "free ETH
 // faucet" hole where a client could ask for any amount up to the cap.
 //
-// The client's hint is still checked against SPONSOR_MAX_WEI, and the
-// computed send is also capped by SPONSOR_MAX_WEI — belt and braces.
+// Idempotency: repeated requests for the same (chain, toAddress)
+// within SPONSOR_IDEM_TTL return the first call's result without
+// sending again. This prevents a client that retries on a network
+// blip (or an attacker replaying the request) from getting two
+// sends. After the TTL expires, the "user already funded" check takes
+// over.
 // =====================================================================
 
 async function handleGasSponsor(request, env, cors) {
@@ -641,6 +735,22 @@ async function handleGasSponsor(request, env, cors) {
   if (clientHint > maxSend) return json({ error: `shortfall exceeds safe maximum for ${chain}` }, 400, cors);
 
   if (!env.GAS_SPONSOR_KEY) return json({ error: 'sponsor not configured' }, 500, cors);
+
+  // Idempotency check: same (chain, toAddress) within the window
+  // returns the prior result. Keyed on the normalised address so case
+  // doesn't cause a duplicate send.
+  const idemKey = `sponsor:idem:${chain}:${toAddress.toLowerCase()}`;
+  const prior = await env.CREDITS.get(idemKey);
+  if (prior) {
+    try {
+      const parsed = JSON.parse(prior);
+      return json({
+        ok: true, sent: parsed.sent, txHash: parsed.txHash, alreadySent: true,
+      }, 200, cors);
+    } catch {
+      // Corrupt record — fall through and try to send again below.
+    }
+  }
 
   // Build the sponsor wallet. Accepts a hex private key OR a BIP-39
   // mnemonic. `buildSponsorWallet` detects the shape and picks the
@@ -685,6 +795,12 @@ async function handleGasSponsor(request, env, cors) {
   try {
     const tx = await sponsorWallet.sendTransaction({ to: toAddress, value: shortfall });
     await tx.wait(1);
+
+    // Record the send so a retry within the window doesn't send again.
+    await env.CREDITS.put(idemKey, JSON.stringify({
+      sent: shortfall.toString(), txHash: tx.hash, at: new Date().toISOString(),
+    }), { expirationTtl: SPONSOR_IDEM_TTL }).catch(() => {});
+
     return json({ ok: true, sent: shortfall.toString(), txHash: tx.hash }, 200, cors);
   } catch (e) {
     // Never echo e.message. Ethers v6 embeds the offending argument in

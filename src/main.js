@@ -16,6 +16,9 @@
  *     tricked into forwarding to an attacker address.
  *   - Amounts in receipts are still client-reported; the operator
  *     should verify them against the chain before forwarding large sums.
+ *   - /credits/consume and /gas/sponsor are idempotent on stable keys,
+ *     so a client retry after a network blip won't double-charge or
+ *     double-send.
  */
 
 import { ethers } from 'ethers';
@@ -839,7 +842,8 @@ async function runSweep(live) {
 
   // Stable ID for this sweep attempt. Used as the idempotency key when
   // recording the fee on the worker, so retrying recordFee won't
-  // create duplicate entries. Also the key for the sweep commit.
+  // create duplicate entries. Also the key for the sweep commit and
+  // for the credit consumption.
   const sweepId = crypto.randomUUID();
 
   const inputs = readInputs();
@@ -878,10 +882,10 @@ async function runSweep(live) {
       return;
     }
 
-    // The button click in Live mode is the confirmation — no
-    // prompt() blocking dialog. Credit is consumed immediately.
+    // Consume the credit. The sweepId is passed so that a retry after
+    // a network blip doesn't double-charge. The worker dedups on it.
     try {
-      const newBalance = await consumeCredit('sweep');
+      const newBalance = await consumeCredit('sweep', sweepId);
       logLine(`Credit consumed. Remaining: ${newBalance}`);
       updateCreditsBadge(newBalance);
     } catch (err) {
