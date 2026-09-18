@@ -31,11 +31,6 @@ export function getClientId() {
   return id;
 }
 
-/**
- * Overwrite the local client ID. Does NOT verify the ID exists on the
- * worker — callers that need verification should call
- * verifyClientId() first, then setClientId() on success.
- */
 export function setClientId(id) {
   if (!isValidClientId(id)) {
     throw new Error('Invalid client ID format');
@@ -44,15 +39,6 @@ export function setClientId(id) {
   cachedBalance = null;
 }
 
-/**
- * Check whether a client ID exists on the worker and has any credits
- * or history. Returns { valid, balance, paid, free, hasHistory }.
- * Used by the Account restore flow to refuse to overwrite the current
- * identity with a typo'd or empty ID.
- *
- * Uses the public /credits/balance endpoint. If the worker later
- * exposes an authenticated check, swap it in here.
- */
 export async function verifyClientId(id) {
   if (!isValidClientId(id)) {
     return { valid: false, reason: 'format' };
@@ -68,9 +54,6 @@ export async function verifyClientId(id) {
     const balance = data.balance ?? 0;
     const paid = data.paid ?? 0;
     const free = data.free ?? 0;
-    // An ID is considered recoverable if it has any credit at all.
-    // History is not exposed by /credits/balance, so we treat
-    // "paid + free > 0" as the signal that this ID has value.
     return { valid: balance > 0 || paid > 0 || free > 0, balance, paid, free };
   } catch (err) {
     return { valid: false, reason: err.message };
@@ -113,10 +96,6 @@ export async function fetchBalance(opts = {}) {
   }
 }
 
-/**
- * Full snapshot of the current balance state: effective total, paid
- * count, free count, and the free-pool expiry timestamp.
- */
 export async function fetchBalanceSnapshot(opts = {}) {
   await fetchBalance(opts);
   return cachedBalance ? { ...cachedBalance } : null;
@@ -243,6 +222,29 @@ export async function requestGasSponsorship(chain, toAddress, shortfallWei) {
 
 export async function commitSweep(sweepId, userDestination) {
   const resp = await fetch(`${PAYMENT_WORKER_URL}/sweep/commit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      clientId: getClientId(),
+      sweepId,
+      userDestination,
+    }),
+  });
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+  return data;
+}
+
+/**
+ * Update the destination on a pending sweep. Used after a live sweep
+ * completes without a destination — the commit was made with a
+ * placeholder, and this call replaces it with the user's real address.
+ *
+ * The worker refuses to change the destination after a sweep has been
+ * forwarded, so it's safe to call this even on stale sweeps.
+ */
+export async function updateSweepDestination(sweepId, userDestination) {
+  const resp = await fetch(`${PAYMENT_WORKER_URL}/sweep/destination`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({

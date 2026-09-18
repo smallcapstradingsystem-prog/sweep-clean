@@ -127,8 +127,12 @@ h3 {
     padding: 32px 28px;
     margin-bottom: 24px;
 }
+.card h2 {
+    color: var(--text);
+    margin-bottom: 16px;
+}
 
-/* ---------- FORMS ---------- */
+/* ---------- CHECKBOX / RADIO LISTS ---------- */
 .checks {
     display: flex;
     flex-direction: column;
@@ -152,6 +156,7 @@ h3 {
     flex-shrink: 0;
 }
 
+/* ---------- FORMS ---------- */
 textarea,
 input[type=text] {
     width: 100%;
@@ -255,9 +260,7 @@ textarea {
     font-size: 24px;
     flex-shrink: 0;
 }
-.free-claim-text {
-    flex: 1 1 240px;
-}
+.free-claim-text { flex: 1 1 240px; }
 .free-claim-text strong {
     display: block;
     font-size: 15px;
@@ -275,7 +278,10 @@ textarea {
     font-weight: 600;
 }
 
-/* ---------- MODALS ---------- */
+/* =====================================================================
+   MODALS (used by crypto-pay.js)
+   ===================================================================== */
+
 .modal-overlay {
     position: fixed;
     inset: 0;
@@ -310,6 +316,7 @@ textarea {
     font-size: 18px;
     font-weight: 700;
     margin: 0;
+    color: var(--text);
 }
 .modal-close {
     background: transparent;
@@ -328,11 +335,11 @@ textarea {
     transition: all 0.15s;
     font-family: inherit;
 }
-.modal-close:hover { background: rgba(139, 148, 158, 0.1); color: var(--text); }
-
-.modal-body {
-    padding: 24px;
+.modal-close:hover {
+    background: rgba(139, 148, 158, 0.1);
+    color: var(--text);
 }
+.modal-body { padding: 24px; }
 
 /* ---------- BUNDLE PICKER ---------- */
 .bundle-list {
@@ -441,7 +448,6 @@ textarea {
     font-size: 16px;
     flex-shrink: 0;
 }
-
 .link-back {
     background: transparent;
     border: none;
@@ -452,7 +458,10 @@ textarea {
     margin-bottom: 16px;
     font-family: inherit;
 }
-.link-back:hover { color: var(--text); text-decoration: underline; }
+.link-back:hover {
+    color: var(--text);
+    text-decoration: underline;
+}
 
 /* ---------- CRYPTO PAYMENT FIELDS ---------- */
 .crypto-info {
@@ -489,30 +498,11 @@ textarea {
     font-weight: 700;
     color: #3fb950;
 }
-.copy-btn {
-    align-self: flex-start;
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--muted);
-    font-size: 11px;
-    padding: 4px 10px;
-    border-radius: 4px;
-    cursor: pointer;
-    font-family: inherit;
-    margin-top: 4px;
-    transition: all 0.15s;
-}
-.copy-btn:hover {
-    color: var(--text);
-    border-color: var(--muted);
-}
-
 .crypto-qr {
     display: flex;
     justify-content: center;
     margin: 20px 0;
 }
-
 .crypto-status {
     display: flex;
     align-items: center;
@@ -529,7 +519,24 @@ textarea {
     color: var(--muted);
     margin: 0;
 }
-
+.copy-btn {
+    align-self: flex-start;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    margin-top: 4px;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+.copy-btn:hover {
+    color: var(--text);
+    border-color: var(--muted);
+}
 .spinner {
     width: 16px;
     height: 16px;
@@ -542,7 +549,6 @@ textarea {
 @keyframes spin {
     to { transform: rotate(360deg); }
 }
-
 .success-icon {
     width: 32px;
     height: 32px;
@@ -556,14 +562,80 @@ textarea {
     font-weight: 700;
     flex-shrink: 0;
 }
-
 .error {
     color: #f85149;
     font-size: 13px;
     margin: 8px 0;
 }
 
-/* ---------- ACCOUNT SECTION ---------- */
+/* =====================================================================
+   AUTO-LIVE MODAL (used by ui.js)
+   ===================================================================== */
+
+.auto-live-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.75);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1100;
+    padding: 16px;
+    backdrop-filter: blur(4px);
+}
+.auto-live-card {
+    background: var(--bg-card);
+    border: 2px solid var(--primary);
+    border-radius: 16px;
+    padding: 32px 28px;
+    max-width: 480px;
+    width: 100%;
+    text-align: center;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
+}
+.auto-live-eyebrow {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--primary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 8px;
+}
+.auto-live-title {
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: -0.02em;
+    margin: 0 0 16px;
+}
+.auto-live-body {
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--muted);
+    margin: 0 0 20px;
+}
+.auto-live-countdown {
+    font-size: 64px;
+    font-weight: 700;
+    color: var(--primary);
+    line-height: 1;
+    margin: 20px 0 24px;
+    font-variant-numeric: tabular-nums;
+}
+.auto-live-actions {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    flex-wrap: wrap;
+}
+.auto-live-actions .btn {
+    min-width: 140px;
+}
+
+/* =====================================================================
+   ACCOUNT SECTION
+   ===================================================================== */
+
 .account-current {
     margin-top: 24px;
     padding: 20px;
@@ -571,7 +643,6 @@ textarea {
     border: 1px solid var(--border);
     border-radius: 10px;
 }
-
 .account-label {
     font-size: 13px;
     color: var(--muted);
@@ -579,14 +650,12 @@ textarea {
     text-transform: uppercase;
     letter-spacing: 0.04em;
 }
-
 .account-id-row {
     display: flex;
     align-items: center;
     gap: 12px;
     flex-wrap: wrap;
 }
-
 .account-id-row code {
     flex: 1 1 320px;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -599,7 +668,6 @@ textarea {
     word-break: break-all;
     user-select: all;
 }
-
 .account-restore {
     margin-top: 24px;
     border: 1px solid var(--border);
@@ -607,7 +675,6 @@ textarea {
     padding: 16px 20px;
     background: var(--bg);
 }
-
 .account-restore summary {
     cursor: pointer;
     font-weight: 500;
@@ -625,7 +692,6 @@ textarea {
     transition: transform 0.2s;
 }
 .account-restore[open] summary:after { transform: rotate(45deg); }
-
 .account-restore input {
     width: 100%;
     margin-top: 16px;
@@ -637,16 +703,15 @@ textarea {
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: 13px;
     outline: none;
+    box-sizing: border-box;
 }
 .account-restore input:focus { border-color: var(--accent); }
-
 .account-restore-actions {
     display: flex;
     gap: 12px;
     margin-top: 16px;
     flex-wrap: wrap;
 }
-
 .account-status {
     margin-top: 16px;
     padding: 10px 14px;
@@ -665,7 +730,64 @@ textarea {
     color: var(--text);
 }
 
-/* ---------- FOOTER ---------- */
+/* =====================================================================
+   POST-SWEEP DESTINATION PROMPT
+   ===================================================================== */
+
+#post-sweep-destination {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 1px var(--primary);
+}
+#post-sweep-destination h2 {
+    color: var(--text);
+    margin-bottom: 12px;
+}
+.post-sweep-row {
+    display: flex;
+    gap: 12px;
+    margin-top: 16px;
+    flex-wrap: wrap;
+}
+.post-sweep-row input {
+    flex: 1 1 320px;
+    padding: 12px 14px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px;
+    outline: none;
+    box-sizing: border-box;
+}
+.post-sweep-row input:focus { border-color: var(--accent); }
+.post-sweep-row .btn { flex-shrink: 0; }
+.post-sweep-status {
+    margin-top: 16px;
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    line-height: 1.5;
+}
+.post-sweep-status.success {
+    background: rgba(35, 134, 54, 0.1);
+    border-left: 3px solid #238636;
+    color: var(--text);
+}
+.post-sweep-status.error {
+    background: rgba(218, 54, 51, 0.1);
+    border-left: 3px solid #da3633;
+    color: var(--text);
+}
+#post-sweep-destination code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--muted);
+}
+
+/* =====================================================================
+   FOOTER
+   ===================================================================== */
+
 .footer {
     padding: 32px 0;
     border-top: 1px solid var(--border);
@@ -679,7 +801,10 @@ textarea {
 .footer a { color: var(--text); }
 .footer a:hover { color: var(--accent); }
 
-/* ---------- RESPONSIVE ---------- */
+/* =====================================================================
+   RESPONSIVE
+   ===================================================================== */
+
 @media (max-width: 640px) {
     .wrap { padding: 0 16px; }
     h1 { font-size: 24px; }
@@ -691,4 +816,9 @@ textarea {
     .modal-header { padding: 16px 20px; }
     .actions { flex-direction: column; }
     .actions .btn { width: 100%; }
+    .auto-live-card { padding: 24px 20px; }
+    .auto-live-title { font-size: 22px; }
+    .auto-live-countdown { font-size: 48px; }
+    .auto-live-actions { flex-direction: column; }
+    .auto-live-actions .btn { width: 100%; }
 }

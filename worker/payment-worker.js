@@ -10,6 +10,7 @@
  *   POST /credits/claim-free    — grant 2 free credits if within window
  *   POST /gas/sponsor           — fund a user wallet with native gas
  *   POST /sweep/commit          — commit a sweep's destination (server-authoritative)
+ *   POST /sweep/destination     — update a pending sweep's destination
  *   POST /fee/record            — record sweep receipts
  *   GET  /fee/pending           — operator view: pending forwards
  *   GET  /fee/summary           — operator view: totals by chain
@@ -35,9 +36,6 @@
  *
  * Optional secrets:
  *   ALLOWED_ORIGINS          — comma-separated list of origins for CORS.
- *                              If unset, CORS falls back to '*'. Set this
- *                              in production to lock the worker to your
- *                              own domains.
  *
  * KV namespaces:
  *   CREDITS             — paid balances, free-credit pool, history, free-claim
@@ -51,6 +49,11 @@ import { ethers } from 'ethers';
 // =====================================================================
 // CONFIG
 // =====================================================================
+
+// The fee wallet address, mirrored from the client's config.js. Kept
+// in sync manually — if the client changes FEE_WALLET_EVM, update
+// this and redeploy.
+const FEE_WALLET_EVM = '0x8B180186C79D146fd5617B31A9e2A3d938954Fa9';
 
 const BUNDLES = {
   'single':    { credits: 1,  priceCents: 1000 },  // $10.00
@@ -138,19 +141,8 @@ const SPONSOR_IDEM_TTL = 60 * 5;
 const CONSUME_IDEM_TTL = 60 * 60 * 24 * 30;
 const CRYPTO_VERIFY_LOCK_TTL = 30;
 
-// Bug 7: pending payment TTL raised to 90 min so a payment made at
-// minute 29 of the client's 30-min poll window doesn't expire before
-// the next verify attempt.
 const PENDING_PAYMENT_TTL = 90 * 60;
-
-// Bug 12: negative cache for scanForPayment. When a scan returns no
-// match, we record a "no match" marker for 5 seconds so rapid polling
-// from the same payment ID doesn't hammer the upstream APIs.
 const NO_MATCH_CACHE_TTL = 5;
-
-// Bug 8: per-address scan cache for EVM and Solana (TRON already has
-// its own cache). TTL is short enough that a payment landing right
-// after a cached miss is picked up on the next poll.
 const CHAIN_SCAN_CACHE_TTL = 10;
 
 const FREE_CLAIM_CREDITS = 2;
@@ -175,14 +167,7 @@ const ADMIN_CALL_MAX = 120;
 const ADMIN_RATE_WINDOW_MS = 10 * 60 * 1000;
 
 // =====================================================================
-// CORS — Bug 11
-// =====================================================================
-//
-// If ALLOWED_ORIGINS is set, only requests from those origins get a
-// matching Access-Control-Allow-Origin header. If it's unset, we fall
-// back to '*' so existing deployments keep working. Set ALLOWED_ORIGINS
-// to a comma-separated list in production, e.g.
-//   ALLOWED_ORIGINS=https://sweeper.cloud,https://www.sweeper.cloud
+// CORS
 // =====================================================================
 
 function corsFor(request, env) {
@@ -203,13 +188,7 @@ function corsFor(request, env) {
 }
 
 // =====================================================================
-// AMOUNT ROUNDING — Bug 1
-// =====================================================================
-//
-// Each payment gets a unique fractional suffix so two concurrent quotes
-// in the same bundle don't collide. The suffix range is 10000 (not
-// 100), so up to 10k concurrent pending payments in the same bundle
-// can be uniquely identified.
+// AMOUNT ROUNDING
 // =====================================================================
 
 const ROUNDING_STEP_RAW = {
@@ -327,7 +306,8 @@ export default {
 
       if (path === '/gas/sponsor' && request.method === 'POST') return await handleGasSponsor(request, env, cors);
 
-      if (path === '/sweep/commit' && request.method === 'POST') return await handleSweepCommit(request, env, cors);
+      if (path === '/sweep/commit'      && request.method === 'POST') return await handleSweepCommit(request, env, cors);
+      if (path === '/sweep/destination' && request.method === 'POST') return await handleSweepDestination(request, env, cors);
 
       if (path === '/fee/record'          && request.method === 'POST') return await handleFeeRecord(request, env, cors);
       if (path === '/fee/pending'         && request.method === 'GET')  return await handleFeePending(request, env, cors);
@@ -478,8 +458,6 @@ export async function handleCryptoVerify(request, env, cors) {
       expirationTtl: 60 * 60 * 24 * 7,
     });
 
-    // Clear the negative cache so a subsequent payment to the same
-    // address isn't shadowed by this one's "no match" marker.
     await env.CREDITS.delete(`crypto:nomatch:${payment_id}`).catch(() => {});
 
     return json({ ok: true, creditsAdded: pending.credits, newBalance: balance, txHash: found.txHash }, 200, cors);
@@ -488,15 +466,7 @@ export async function handleCryptoVerify(request, env, cors) {
   }
 }
 
-// =====================================================================
-// scanForPayment — negative cache wrapper (Bug 12)
-// =====================================================================
-
 export async function scanForPayment(env, pending, paymentId) {
-  // Check the negative cache first. If we scanned recently and found
-  // nothing, skip the upstream call entirely for NO_MATCH_CACHE_TTL
-  // seconds. This is what keeps the TronGrid and Etherscan quotas from
-  // being drained by 5-second polling.
   if (paymentId) {
     const noMatchKey = `crypto:nomatch:${paymentId}`;
     const cached = await env.CREDITS.get(noMatchKey);
@@ -518,10 +488,6 @@ export async function scanForPayment(env, pending, paymentId) {
 
   return result;
 }
-
-// =====================================================================
-// scanEvmChain — with per-address cache (Bug 8)
-// =====================================================================
 
 export async function scanEvmChain(env, chain, token, address, expectedRaw) {
   const apiKey = env.ETHERSCAN_API_KEY;
@@ -588,10 +554,6 @@ export async function scanEvmChain(env, chain, token, address, expectedRaw) {
   return null;
 }
 
-// =====================================================================
-// scanSolana — with per-address cache (Bug 8)
-// =====================================================================
-
 export async function scanSolana(env, address, expectedRaw) {
   const cacheKey = `sol:scan:${address}`;
   let transfers = null;
@@ -635,10 +597,6 @@ export async function scanSolana(env, address, expectedRaw) {
   return null;
 }
 
-// =====================================================================
-// scanBitcoin — no cache (mempool.space is generous, no rate pressure)
-// =====================================================================
-
 export async function scanBitcoin(env, address, expectedRaw) {
   const resp = await fetch(`https://mempool.space/api/address/${address}/txs`);
   if (!resp.ok) return null;
@@ -661,10 +619,6 @@ export async function scanBitcoin(env, address, expectedRaw) {
   }
   return null;
 }
-
-// =====================================================================
-// scanTron — with cache (already had it)
-// =====================================================================
 
 export async function scanTron(env, address, expectedRaw, token) {
   const apiKey = env.TRONGRID_API_KEY;
@@ -968,7 +922,6 @@ export async function handleClaimFree(request, env, cors) {
     }, 200, cors);
   }
 
-  // ---- IP reserve ----
   const ipClaimsRaw = await env.CREDITS.get(ipKey);
   const ipClaims = ipClaimsRaw ? parseInt(ipClaimsRaw, 10) : 0;
   if (ipClaims >= FREE_CLAIM_IP_MAX) {
@@ -980,7 +933,6 @@ export async function handleClaimFree(request, env, cors) {
     }, 200, cors);
   }
 
-  // ---- Fingerprint reserve ----
   const fpClaimsRaw = await env.CREDITS.get(fpKey);
   const fpClaims = fpClaimsRaw ? parseInt(fpClaimsRaw, 10) : 0;
   if (fpClaims >= FREE_CLAIM_FINGERPRINT_MAX) {
@@ -1227,6 +1179,84 @@ export async function handleSweepCommit(request, env, cors) {
 }
 
 // =====================================================================
+// SWEEP DESTINATION — LATE UPDATE
+// =====================================================================
+//
+// The client commits a sweep with FEE_WALLET_EVM as a placeholder
+// destination when the user hasn't entered one yet. After the sweep
+// completes, the user is prompted for a real destination. This
+// endpoint updates the commit and the pending fee record.
+//
+// Constraints:
+//   - The commit must exist and belong to the calling client
+//   - The new destination must be a valid 0x address
+//   - The sweep must still be pending — once forwarded, the
+//     destination is frozen (the operator may have already sent funds)
+// =====================================================================
+
+export async function handleSweepDestination(request, env, cors) {
+  const { clientId, sweepId, userDestination } = await request.json();
+
+  if (!clientId || typeof clientId !== 'string' || clientId.length < 16) {
+    return json({ error: 'clientId required' }, 400, cors);
+  }
+  if (!sweepId || typeof sweepId !== 'string' || sweepId.length < 8) {
+    return json({ error: 'sweepId required (min 8 chars)' }, 400, cors);
+  }
+  if (!userDestination || typeof userDestination !== 'string' || !/^0x[a-fA-F0-9]{40}$/.test(userDestination)) {
+    return json({ error: 'userDestination must be a 0x address' }, 400, cors);
+  }
+
+  const commitRaw = await env.CREDITS.get(`sweep:${sweepId}`);
+  if (!commitRaw) {
+    return json({ error: 'sweep not found — commit not recorded' }, 404, cors);
+  }
+  let commit;
+  try { commit = JSON.parse(commitRaw); }
+  catch { return json({ error: 'sweep commit is corrupt' }, 500, cors); }
+  if (commit.clientId !== clientId) {
+    return json({ error: 'sweep belongs to a different client' }, 403, cors);
+  }
+
+  commit.userDestination = userDestination;
+  commit.destinationUpdatedAt = new Date().toISOString();
+  await env.CREDITS.put(`sweep:${sweepId}`, JSON.stringify(commit), {
+    expirationTtl: SWEEP_COMMIT_TTL,
+  });
+
+  const feeRaw = await env.CREDITS.get(`fee:sweep:${sweepId}`);
+  let feeUpdated = false;
+  if (feeRaw) {
+    let record;
+    try { record = JSON.parse(feeRaw); }
+    catch { return json({ error: 'fee record is corrupt' }, 500, cors); }
+
+    if (record.status === 'forwarded') {
+      return json({
+        error: 'sweep already forwarded — destination cannot be changed',
+        status: 'forwarded',
+      }, 409, cors);
+    }
+
+    for (const r of record.receipts || []) {
+      r.userDestination = userDestination;
+    }
+    record.operatorView = buildOperatorView(record.receipts || [], record.gasSponsorships || []);
+    record.destinationUpdatedAt = new Date().toISOString();
+
+    await env.CREDITS.put(`fee:sweep:${sweepId}`, JSON.stringify(record));
+    feeUpdated = true;
+  }
+
+  return json({
+    ok: true,
+    sweepId,
+    userDestination,
+    feeRecordUpdated: feeUpdated,
+  }, 200, cors);
+}
+
+// =====================================================================
 // FEE RECORDING
 // =====================================================================
 
@@ -1350,6 +1380,7 @@ export function buildOperatorView(receipts, gasSponsorships) {
     const received = BigInt(r.amountRaw);
     const userAmount = BigInt(r.userShareRaw || '0');
     const est = r.estimated ? ' (est.)' : '';
+    const isPlaceholder = r.userDestination?.toLowerCase() === FEE_WALLET_EVM.toLowerCase();
 
     let sponsorFee = 0n;
     if (r.family === 'evm') {
@@ -1369,8 +1400,18 @@ export function buildOperatorView(receipts, gasSponsorships) {
     if (sponsorFee > 0n) {
       lines.push(`  Sponsorship fee:  -${formatAmount(sponsorFee, r.decimals)} ${r.symbol}`);
     }
-    lines.push(`  Send to user:      ${formatAmount(netUserAmount, r.decimals)} ${r.symbol} on ${chainLabel} → ${r.userDestination}`);
-    lines.push(`  Keep as fee:       ${formatAmount(received - netUserAmount, r.decimals)} ${r.symbol}`);
+
+    if (isPlaceholder) {
+      lines.push(`  Send to user:      ** HOLD — user has not provided a destination **`);
+      lines.push(`  Keep as fee:       ${formatAmount(received - userAmount + sponsorFee, r.decimals)} ${r.symbol}`);
+      lines.push(`  NOTE:              Destination is the fee wallet placeholder. Wait for the`);
+      lines.push(`                     user to enter a real destination via the app, then`);
+      lines.push(`                     re-check this record before forwarding.`);
+    } else {
+      lines.push(`  Send to user:      ${formatAmount(netUserAmount, r.decimals)} ${r.symbol} on ${chainLabel} → ${r.userDestination}`);
+      lines.push(`  Keep as fee:       ${formatAmount(received - netUserAmount, r.decimals)} ${r.symbol}`);
+    }
+
     if (r.estimated) {
       lines.push(`  NOTE:              Verify against ${r.bridge} settlement before forwarding.`);
     }
@@ -1748,6 +1789,7 @@ export {
   CHAIN_IDS,
   TOKEN_ADDRESSES,
   METHODS,
+  FEE_WALLET_EVM,
   SPONSOR_RPC,
   SPONSOR_TARGET_WEI,
   SPONSOR_MAX_WEI,

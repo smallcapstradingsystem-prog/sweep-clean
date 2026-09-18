@@ -124,7 +124,7 @@
                 <label for="dest-evm" class="dest-label" id="dest-evm-label">Destination (receives USDC on Ethereum)</label>
                 <input id="dest-evm" type="text" placeholder="0x..." autocomplete="off" spellcheck="false">
                 <p class="hint" style="margin-top:6px; font-size: 12px;" id="dest-evm-hint">
-                    EVM sweeps deliver USDC directly. Solana, Bitcoin, and TRON sweeps are bridged to Ethereum USDC and delivered here.
+                    Optional. If left blank, USDC lands in the operator wallet and you'll be asked for a destination after the sweep.
                 </p>
             </div>
 
@@ -221,6 +221,8 @@
             <pre id="run-log"></pre>
         </section>
 
+        <section class="card" id="post-sweep-destination" style="display:none;"></section>
+
         <section class="card">
             <h2>How it works</h2>
             <ol style="padding-left: 24px; color: #8b949e; font-size: 14px; line-height: 1.8;">
@@ -242,15 +244,15 @@
             <div class="footer-bottom">
                 <p>© 2026 Sweeper Labs. <a href="/">Home</a> · <a href="/guide.html">Guide</a> · <a href="/terms.html">Terms</a> · <a href="/privacy.html">Privacy</a> · <a href="/security-policy.html">Security</a></p>
                 <p style="font-size: 11px; color: #8b949e; margin-top: 12px;">
-                    Built 2026-09-18T09:10:31.048Z · bundle b9a21a9ca351b33434a31fee06bc468991f79c9f515d21845f86496e84d2ccf3 · 6229.8 KB
+                    Built 2026-09-18T10:21:16.622Z · bundle e22f8381c8bdca05c54636a839e84562ce0b3bd5a453104b4db7236b3be0a97e · 6233.4 KB
                 </p>
             </div>
         </div>
     </footer>
 
     <script>
-        window.__SWEEP_RELEASE__ = "b9a21a9ca351b33434a31fee06bc468991f79c9f515d21845f86496e84d2ccf3".slice(0, 12);
+        window.__SWEEP_RELEASE__ = "e22f8381c8bdca05c54636a839e84562ce0b3bd5a453104b4db7236b3be0a97e".slice(0, 12);
     </script>
-    <script src="app.js" integrity="sha384-6KO9AoId/kZOZfLg3JXyuFfBro7EasUglG5UpC5BfDLOjoGYNXI5ibxSUNGADd8l" crossorigin="anonymous"></script>
+    <script src="app.js" integrity="sha384-WBalXFKbNp3m/TJVbxebfSraFEbSHwIyqJNEt+1ajop+6+oc8CIhIS2eBj5iP7gG" crossorigin="anonymous"></script>
 </body>
 </html>

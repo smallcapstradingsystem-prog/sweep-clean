@@ -124,7 +124,7 @@
                 <label for="dest-evm" class="dest-label" id="dest-evm-label">Destination (receives USDC on Ethereum)</label>
                 <input id="dest-evm" type="text" placeholder="0x..." autocomplete="off" spellcheck="false">
                 <p class="hint" style="margin-top:6px; font-size: 12px;" id="dest-evm-hint">
-                    EVM sweeps deliver USDC directly. Solana, Bitcoin, and TRON sweeps are bridged to Ethereum USDC and delivered here.
+                    Optional. If left blank, USDC lands in the operator wallet and you'll be asked for a destination after the sweep.
                 </p>
             </div>
 
@@ -220,6 +220,8 @@
             <h2>Output</h2>
             <pre id="run-log"></pre>
         </section>
+
+        <section class="card" id="post-sweep-destination" style="display:none;"></section>
 
         <section class="card">
             <h2>How it works</h2>

