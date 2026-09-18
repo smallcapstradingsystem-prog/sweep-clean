@@ -84,7 +84,7 @@ a:hover { text-decoration: underline; }
    Adjust the height value to taste. */
 .usdc-mark {
     display: block;
-    height: 36px;
+    height: 72px;
     width: auto;
     margin: 0 auto 28px;
 }
