@@ -169,6 +169,23 @@ function showWalletSection(type) {
   if (target) target.style.display = '';
 }
 
+/**
+ * Show or hide the mnemonic-specific security notice. It only makes
+ * sense when the user has actually chosen the mnemonic input path —
+ * for extension, WalletConnect, Ledger, and Trezor flows there are no
+ * keys typed into the page, so the notice is misleading.
+ */
+function syncMnemonicNotice() {
+  const walletType = $('input[name=wallet-type]:checked')?.value;
+  const notice = $('#mnemonic-security-notice');
+  if (!notice) return;
+  if (walletType === 'mnemonic') {
+    notice.style.display = '';
+  } else {
+    notice.style.display = 'none';
+  }
+}
+
 function readInputs() {
   const walletType = $('input[name=wallet-type]:checked')?.value || 'mnemonic';
   const families = {
@@ -1358,11 +1375,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     radio.addEventListener('change', (e) => {
       showWalletSection(e.target.value);
       hide('#connected-banner');
+      syncMnemonicNotice();
     });
   });
 
   const initialWalletType = $('input[name=wallet-type]:checked')?.value || 'extension';
   showWalletSection(initialWalletType);
+  syncMnemonicNotice();
 
   ['#family-evm', '#family-solana', '#family-bitcoin'].forEach((sel) => {
     const el = $(sel);
