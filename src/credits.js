@@ -55,14 +55,6 @@ export async function fetchBalance(opts = {}) {
   }
 }
 
-/**
- * Consume one credit.
- *
- * The optional `sweepId` makes the operation idempotent: if the
- * network drops after the worker processed the decrement, the client
- * can safely retry the call with the same sweepId and the worker will
- * return the prior result instead of decrementing again.
- */
 export async function consumeCredit(reason = 'sweep', sweepId = null) {
   const body = { clientId: getClientId(), reason };
   if (sweepId) body.sweepId = sweepId;
@@ -97,11 +89,14 @@ export async function fetchClaimInfo() {
   return data;
 }
 
-export async function claimFreeCredits() {
+export async function claimFreeCredits(fingerprint) {
+  const body = { clientId: getClientId() };
+  if (fingerprint) body.fingerprint = fingerprint;
+
   const resp = await fetch(`${PAYMENT_WORKER_URL}/credits/claim-free`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ clientId: getClientId() }),
+    body: JSON.stringify(body),
   });
   const data = await resp.json();
   if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);

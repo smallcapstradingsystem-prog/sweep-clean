@@ -53,6 +53,7 @@ import {
 } from './config.js';
 import { scrubSecret } from './scrub.js';
 import { ChainVerifyError, verifySignerChain } from './chain-verify.js';
+import { getFingerprint } from './fingerprint.js';
 import {
   recordFeeWithRetry as recordFeeWithRetryCore,
   commitSweepWithRetry as commitSweepWithRetryCore,
@@ -304,6 +305,27 @@ function renderFreeClaimBanner(info) {
     return;
   }
 
+  // Fingerprint cap takes priority in the copy: a user who hit the
+  // per-device cap but is on a fresh network would otherwise see the
+  // "per network" message, which is misleading. The worker only sets
+  // one of these flags per response, but we check fingerprint first
+  // for clarity.
+  if (info.blockedByFingerprint) {
+    const used = info.fpClaims ?? '?';
+    const max = info.fpMax ?? '?';
+    banner.style.display = '';
+    banner.innerHTML = `
+      <div class="free-claim-inner">
+        <span class="free-claim-icon">✓</span>
+        <div class="free-claim-text">
+          <strong>Free credits claimed</strong>
+          <p>This launch bonus is limited to ${max} claims per device (${used} used).</p>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
   if (info.blockedByIp) {
     const used = info.ipClaims ?? '?';
     const max = info.ipMax ?? '?';
@@ -376,9 +398,12 @@ function renderFreeClaimBanner(info) {
       claimBtn.disabled = true;
       claimBtn.textContent = 'Claiming...';
       try {
-        const result = await claimFreeCredits();
+        const fingerprint = await getFingerprint();
+        const result = await claimFreeCredits(fingerprint);
         if (result.creditsGranted > 0) {
           logLine(`Welcome bonus: ${result.creditsGranted} free sweep credits added.`);
+        } else if (result.blockedByFingerprint) {
+          logLine(`Free credits already claimed on this device (${result.fpClaims}/${result.fpMax}).`);
         } else if (result.blockedByIp) {
           logLine(`Free credits already claimed on this network (${result.ipClaims}/${result.ipMax}).`);
         } else if (result.offerExpired) {
@@ -388,8 +413,12 @@ function renderFreeClaimBanner(info) {
         }
         const newBalance = await fetchBalance({ force: true });
         updateCreditsBadge(newBalance);
+        // Merge the click response over the fresh info so the banner
+        // can render the fingerprint-cap copy immediately. claim-info
+        // doesn't return the fingerprint fields, so without this merge
+        // the banner would only ever see the IP-side state.
         const freshInfo = await fetchClaimInfo();
-        renderFreeClaimBanner(freshInfo);
+        renderFreeClaimBanner({ ...freshInfo, ...result });
       } catch (err) {
         claimBtn.disabled = false;
         claimBtn.textContent = 'Try again';

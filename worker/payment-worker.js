@@ -17,6 +17,7 @@
  *   POST /admin/credits/grant   — grant credits to a client (operator)
  *   POST /admin/credits/lookup  — read balance + history for a client (operator)
  *   GET  /admin/credits/list    — enumerate client balances (operator)
+ *   POST /admin/clients/lookup-by-fingerprint — find clients by fingerprint (operator)
  *   GET  /health                — health check
  *
  * Required secrets:
@@ -37,7 +38,7 @@
  * KV namespaces:
  *   CREDITS             — balances, history, free-claim state, rate limits,
  *                         fee records, sweep commits, idempotency keys,
- *                         admin rate limits
+ *                         admin rate limits, client metadata
  *   PENDING_PAYMENTS    — crypto payment records
  */
 
@@ -160,8 +161,18 @@ const FREE_CLAIM_CREDITS = 3;
 const FREE_CLAIM_WINDOW_MS = 24 * 60 * 60 * 1000;
 const FREE_CLAIM_START_TTL = 48 * 60 * 60;
 const FREE_CLAIM_GRANTED_TTL = 60 * 60 * 24 * 365;
-const FREE_CLAIM_IP_MAX = 3;
+const FREE_CLAIM_IP_MAX = 2;
 const FREE_CLAIM_IP_TTL = 60 * 60 * 24 * 7;
+
+// Fingerprint cap: independent of IP. A single browser profile can't
+// claim more than this many times in the window, even if it rotates
+// clientIds or the attacker rotates IPs. Complements the IP cap.
+//
+// A missing fingerprint (empty string) is treated as its own bucket —
+// a client that declines to send one can still claim, but all such
+// claims share the same counter, so the cap still applies.
+const FREE_CLAIM_FINGERPRINT_MAX = 2;
+const FREE_CLAIM_FINGERPRINT_TTL = 60 * 60 * 24 * 7;
 
 // Sweep commits are keyed by sweepId and hold the authoritative
 // destination for a sweep. Written by /sweep/commit, read by
@@ -284,6 +295,7 @@ export default {
       if (path === '/admin/credits/grant'  && request.method === 'POST') return await handleAdminCreditsGrant(request, env, cors);
       if (path === '/admin/credits/lookup' && request.method === 'POST') return await handleAdminCreditsLookup(request, env, cors);
       if (path === '/admin/credits/list'   && request.method === 'GET')  return await handleAdminCreditsList(request, env, cors);
+      if (path === '/admin/clients/lookup-by-fingerprint' && request.method === 'POST') return await handleAdminClientLookupByFingerprint(request, env, cors);
 
       return json({ error: 'not found' }, 404, cors);
     } catch (err) {
@@ -594,10 +606,18 @@ export async function addCredits(env, clientId, delta, metadata = {}) {
 // Option B: the 24h window starts on the first successful claim.
 // /credits/claim-info never writes to KV.
 //
-// IP policy: up to 3 claims per IP within a rolling 7-day window. The
-// IP counter is incremented before the grant (a "reserve") so two
-// concurrent requests from the same IP can't both read N and both
-// grant. If the grant throws, the reservation is released.
+// IP policy: up to 2 claims per IP within a rolling 7-day window.
+//
+// Fingerprint policy: up to 2 claims per fingerprint within a rolling
+// 7-day window. The fingerprint is a soft hash of ambient browser
+// signals, sent only on /credits/claim-free. An empty/missing
+// fingerprint is treated as its own bucket, so a client that declines
+// to send one can still claim but shares a counter with all other
+// such clients.
+//
+// Both counters are incremented before the grant (a "reserve") so two
+// concurrent requests can't both read N and both grant. If the grant
+// throws, both reservations are released.
 // =====================================================================
 
 export async function handleClaimInfo(request, env, cors) {
@@ -655,10 +675,16 @@ export async function handleClaimInfo(request, env, cors) {
 }
 
 export async function handleClaimFree(request, env, cors) {
-  const { clientId } = await request.json();
+  const { clientId, fingerprint } = await request.json();
   if (!clientId || typeof clientId !== 'string' || clientId.length < 16) {
     return json({ error: 'clientId required' }, 400, cors);
   }
+
+  // Normalize: empty/missing fingerprint becomes the empty string,
+  // which is treated as its own bucket for rate-limiting purposes.
+  const fp = (typeof fingerprint === 'string' && fingerprint.length > 0)
+    ? fingerprint.slice(0, 64)
+    : '';
 
   const ip = request.headers.get('cf-connecting-ip') || 'unknown';
   const now = Date.now();
@@ -666,6 +692,7 @@ export async function handleClaimFree(request, env, cors) {
   const startKey = `free_claim:start:${clientId}`;
   const grantedKey = `free_claim:granted:${clientId}`;
   const ipKey = `free_claim:ip:${ip}`;
+  const fpKey = `free_claim:fp:${fp}`;
 
   const grantedRaw = await env.CREDITS.get(grantedKey);
   if (grantedRaw) {
@@ -675,8 +702,7 @@ export async function handleClaimFree(request, env, cors) {
     }, 200, cors);
   }
 
-  // Reserve an IP slot first to avoid a race where two concurrent
-  // requests both read `ipClaims = N` and both grant.
+  // ---- IP reserve ----
   const ipClaimsRaw = await env.CREDITS.get(ipKey);
   const ipClaims = ipClaimsRaw ? parseInt(ipClaimsRaw, 10) : 0;
   if (ipClaims >= FREE_CLAIM_IP_MAX) {
@@ -686,19 +712,42 @@ export async function handleClaimFree(request, env, cors) {
       newBalance: await getBalance(env, clientId),
     }, 200, cors);
   }
+
+  // ---- Fingerprint reserve ----
+  const fpClaimsRaw = await env.CREDITS.get(fpKey);
+  const fpClaims = fpClaimsRaw ? parseInt(fpClaimsRaw, 10) : 0;
+  if (fpClaims >= FREE_CLAIM_FINGERPRINT_MAX) {
+    return json({
+      ok: true, blockedByFingerprint: true, creditsGranted: 0,
+      fpClaims, fpMax: FREE_CLAIM_FINGERPRINT_MAX,
+      newBalance: await getBalance(env, clientId),
+    }, 200, cors);
+  }
+
+  // Reserve both slots before doing any writes.
   await env.CREDITS.put(ipKey, String(ipClaims + 1), {
     expirationTtl: FREE_CLAIM_IP_TTL,
   });
+  await env.CREDITS.put(fpKey, String(fpClaims + 1), {
+    expirationTtl: FREE_CLAIM_FINGERPRINT_TTL,
+  });
 
+  // Helper: release both reserved slots on any bail-out path.
+  const releaseSlots = async () => {
+    await env.CREDITS.put(ipKey, String(ipClaims), {
+      expirationTtl: FREE_CLAIM_IP_TTL,
+    }).catch(() => {});
+    await env.CREDITS.put(fpKey, String(fpClaims), {
+      expirationTtl: FREE_CLAIM_FINGERPRINT_TTL,
+    }).catch(() => {});
+  };
+
+  // ---- Window check ----
   const startRaw = await env.CREDITS.get(startKey);
-
   if (startRaw) {
     const windowStart = new Date(startRaw).getTime();
     if (now - windowStart > FREE_CLAIM_WINDOW_MS) {
-      // Release the reserved IP slot — this request is a no-op.
-      await env.CREDITS.put(ipKey, String(ipClaims), {
-        expirationTtl: FREE_CLAIM_IP_TTL,
-      }).catch(() => {});
+      await releaseSlots();
       return json({
         ok: true, offerExpired: true, creditsGranted: 0,
         newBalance: await getBalance(env, clientId),
@@ -710,19 +759,27 @@ export async function handleClaimFree(request, env, cors) {
     });
   }
 
+  // ---- Grant ----
   let newBalance;
   try {
     newBalance = await addCredits(env, clientId, FREE_CLAIM_CREDITS, {
       type: 'free_claim', source: 'launch_bonus',
-      credits: FREE_CLAIM_CREDITS, ip,
+      credits: FREE_CLAIM_CREDITS, ip, fingerprint: fp,
     });
   } catch (e) {
-    // Release the reserved IP slot so the user can retry.
-    await env.CREDITS.put(ipKey, String(ipClaims), {
-      expirationTtl: FREE_CLAIM_IP_TTL,
-    }).catch(() => {});
+    await releaseSlots();
     throw e;
   }
+
+  // Write the client metadata for the admin dashboard. Only happens
+  // once per clientId (the grant is single-shot), so this is one KV
+  // write on the free-claim path and none elsewhere.
+  await env.CREDITS.put(`client_meta:${clientId}`, JSON.stringify({
+    fingerprint: fp || null,
+    ip,
+    host: request.headers.get('host') || 'unknown',
+    firstSeen: new Date(now).toISOString(),
+  }), { expirationTtl: 60 * 60 * 24 * 365 }).catch(() => {});
 
   await env.CREDITS.put(grantedKey, new Date().toISOString(), {
     expirationTtl: FREE_CLAIM_GRANTED_TTL,
@@ -732,6 +789,7 @@ export async function handleClaimFree(request, env, cors) {
     ok: true, creditsGranted: FREE_CLAIM_CREDITS, newBalance,
     windowEnd: new Date(now + FREE_CLAIM_WINDOW_MS).toISOString(),
     ipClaims: ipClaims + 1, ipMax: FREE_CLAIM_IP_MAX,
+    fpClaims: fpClaims + 1, fpMax: FREE_CLAIM_FINGERPRINT_MAX,
   }, 200, cors);
 }
 
@@ -1401,7 +1459,24 @@ export async function handleAdminCreditsList(request, env, cors) {
     const clientId = key.name.slice('balance:'.length);
     const raw = await env.CREDITS.get(key.name);
     const balance = raw ? parseInt(raw, 10) : 0;
-    items.push({ clientId, balance });
+
+    // Look up the metadata if this client claimed free credits. Paying
+    // clients won't have a client_meta record and will show nulls.
+    const metaRaw = await env.CREDITS.get(`client_meta:${clientId}`);
+    let meta = { fingerprint: null, ip: null, host: null, firstSeen: null };
+    if (metaRaw) {
+      try {
+        const parsed = JSON.parse(metaRaw);
+        meta = {
+          fingerprint: parsed.fingerprint || null,
+          ip: parsed.ip || null,
+          host: parsed.host || null,
+          firstSeen: parsed.firstSeen || null,
+        };
+      } catch { /* leave defaults */ }
+    }
+
+    items.push({ clientId, balance, ...meta });
   }
 
   return json({
@@ -1411,6 +1486,38 @@ export async function handleAdminCreditsList(request, env, cors) {
     list_complete: listed.list_complete ?? true,
     items,
   }, 200, cors);
+}
+
+export async function handleAdminClientLookupByFingerprint(request, env, cors) {
+  const ip = request.headers.get('cf-connecting-ip') || 'unknown';
+  await requireAdmin(request, env, ip);
+
+  const body = await request.json();
+  const { fingerprint } = body || {};
+  if (!fingerprint || typeof fingerprint !== 'string') {
+    return json({ error: 'fingerprint required' }, 400, cors);
+  }
+
+  // Scan client_meta:* keys. Cloudflare KV's list() supports prefix
+  // but not value filtering, so we page through and filter in code.
+  // At 100 clients this is fine; at 10k it's slow. If that becomes a
+  // problem, maintain a reverse index (fingerprint → clientIds).
+  const listed = await env.CREDITS.list({ prefix: 'client_meta:', limit: 1000 });
+  const matches = [];
+
+  for (const key of listed.keys) {
+    const clientId = key.name.slice('client_meta:'.length);
+    const raw = await env.CREDITS.get(key.name);
+    if (!raw) continue;
+    let meta;
+    try { meta = JSON.parse(raw); } catch { continue; }
+    if (meta.fingerprint === fingerprint) {
+      const balance = await getBalance(env, clientId);
+      matches.push({ clientId, balance, ...meta });
+    }
+  }
+
+  return json({ ok: true, fingerprint, count: matches.length, matches }, 200, cors);
 }
 
 // =====================================================================
@@ -1440,6 +1547,8 @@ export {
   FREE_CLAIM_CREDITS,
   FREE_CLAIM_WINDOW_MS,
   FREE_CLAIM_IP_MAX,
+  FREE_CLAIM_FINGERPRINT_MAX,
+  FREE_CLAIM_FINGERPRINT_TTL,
   SWEEP_COMMIT_TTL,
   ADMIN_AUTH_FAIL_MAX,
   ADMIN_AUTH_FAIL_WINDOW_MS,

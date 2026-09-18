@@ -116,6 +116,7 @@ function renderShell() {
     el('button', { class: 'btn btn-secondary btn-sm', text: 'Grant credits', onclick: () => switchView('grant') }),
     el('button', { class: 'btn btn-secondary btn-sm', text: 'Lookup client', onclick: () => switchView('lookup') }),
     el('button', { class: 'btn btn-secondary btn-sm', text: 'List clients', onclick: () => switchView('list') }),
+    el('button', { class: 'btn btn-secondary btn-sm', text: 'Fingerprint lookup', onclick: () => switchView('fingerprint') }),
     el('span', { class: 'spacer' }),
     el('button', {
       class: 'btn btn-secondary btn-sm',
@@ -144,12 +145,13 @@ function switchView(view) {
   content.appendChild(el('div', { class: 'spinner' }));
 
   switch (view) {
-    case 'pending': return renderPending(content);
-    case 'summary': return renderSummary(content);
-    case 'grant':   return renderGrant(content);
-    case 'lookup':  return renderLookup(content);
-    case 'list':    return renderList(content);
-    default:        return renderPending(content);
+    case 'pending':     return renderPending(content);
+    case 'summary':     return renderSummary(content);
+    case 'grant':       return renderGrant(content);
+    case 'lookup':      return renderLookup(content);
+    case 'list':        return renderList(content);
+    case 'fingerprint': return renderFingerprintLookup(content);
+    default:            return renderPending(content);
   }
 }
 
@@ -370,6 +372,10 @@ async function renderList(content) {
       el('tr', {}, [
         el('th', { text: 'Client ID' }),
         el('th', { text: 'Balance' }),
+        el('th', { text: 'Fingerprint' }),
+        el('th', { text: 'IP' }),
+        el('th', { text: 'Host' }),
+        el('th', { text: 'First seen' }),
       ]),
     ]));
     const tbody = el('tbody');
@@ -377,6 +383,10 @@ async function renderList(content) {
       tbody.appendChild(el('tr', {}, [
         el('td', {}, [el('code', { text: item.clientId })]),
         el('td', { text: String(item.balance) }),
+        el('td', {}, [item.fingerprint ? el('code', { text: item.fingerprint }) : '—']),
+        el('td', { text: item.ip || '—' }),
+        el('td', { text: item.host || '—' }),
+        el('td', { text: item.firstSeen || '—' }),
       ]));
     }
     table.appendChild(tbody);
@@ -384,6 +394,69 @@ async function renderList(content) {
   } catch (err) {
     showError(content, err);
   }
+}
+
+// =====================================================================
+// VIEW: FINGERPRINT LOOKUP
+// =====================================================================
+
+async function renderFingerprintLookup(content) {
+  content.innerHTML = '';
+
+  content.appendChild(el('h2', { text: 'Look up by fingerprint' }));
+  content.appendChild(el('p', { class: 'hint', text: 'Paste a fingerprint from the List clients view. Returns every clientId that shares it.' }));
+
+  const form = el('div', { class: 'card' });
+  form.appendChild(field('Fingerprint', 'fp-input', 'text'));
+
+  const result = el('div', { class: 'result' });
+
+  form.appendChild(el('button', {
+    class: 'btn btn-primary',
+    text: 'Look up',
+    onclick: async () => {
+      const fingerprint = $('#fp-input').value.trim();
+      if (!fingerprint) return;
+      try {
+        const data = await apiCall('/admin/clients/lookup-by-fingerprint', {
+          method: 'POST',
+          body: { fingerprint },
+        });
+        result.innerHTML = '';
+        result.appendChild(el('p', { text: `${data.count} match${data.count === 1 ? '' : 'es'}` }));
+
+        if (data.matches.length === 0) return;
+
+        const table = el('table', { class: 'summary-table' });
+        table.appendChild(el('thead', {}, [
+          el('tr', {}, [
+            el('th', { text: 'Client ID' }),
+            el('th', { text: 'Balance' }),
+            el('th', { text: 'IP' }),
+            el('th', { text: 'Host' }),
+            el('th', { text: 'First seen' }),
+          ]),
+        ]));
+        const tbody = el('tbody');
+        for (const m of data.matches) {
+          tbody.appendChild(el('tr', {}, [
+            el('td', {}, [el('code', { text: m.clientId })]),
+            el('td', { text: String(m.balance) }),
+            el('td', { text: m.ip || '—' }),
+            el('td', { text: m.host || '—' }),
+            el('td', { text: m.firstSeen || '—' }),
+          ]));
+        }
+        table.appendChild(tbody);
+        result.appendChild(table);
+      } catch (err) {
+        showError(result, err);
+      }
+    },
+  }));
+
+  form.appendChild(result);
+  content.appendChild(form);
 }
 
 // =====================================================================

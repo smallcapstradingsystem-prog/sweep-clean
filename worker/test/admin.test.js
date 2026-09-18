@@ -3,6 +3,7 @@ import {
   handleAdminCreditsGrant,
   handleAdminCreditsLookup,
   handleAdminCreditsList,
+  handleAdminClientLookupByFingerprint,
   handleCreditsBalance,
   getBalance,
 } from '../payment-worker.js';
@@ -289,6 +290,116 @@ describe('admin credits list', () => {
         method: 'GET',
         headers: { 'cf-connecting-ip': '10.0.0.1' },
         url: 'https://test.local/admin/credits/list',
+      }),
+      env, CORS,
+    )).rejects.toMatchObject({ status: 401 });
+  });
+
+  it('includes fingerprint, ip, host, firstSeen when metadata exists', async () => {
+    await env.CREDITS.put('balance:metaclient0000000000000001', '3');
+    await env.CREDITS.put('client_meta:metaclient0000000000000001', JSON.stringify({
+      fingerprint: 'abcd1234abcd1234',
+      ip: '10.0.0.5',
+      host: 'test.local',
+      firstSeen: '2026-01-01T00:00:00.000Z',
+    }));
+
+    const resp = await readResponse(await handleAdminCreditsList(
+      makeRequest({
+        method: 'GET',
+        headers: OPERATOR_HEADERS,
+        url: 'https://test.local/admin/credits/list',
+      }),
+      env, CORS,
+    ));
+    expect(resp.body.items[0].fingerprint).toBe('abcd1234abcd1234');
+    expect(resp.body.items[0].ip).toBe('10.0.0.5');
+    expect(resp.body.items[0].host).toBe('test.local');
+    expect(resp.body.items[0].firstSeen).toBe('2026-01-01T00:00:00.000Z');
+  });
+
+  it('returns null metadata for clients with no client_meta record', async () => {
+    await env.CREDITS.put('balance:payingclient000000000000001', '10');
+
+    const resp = await readResponse(await handleAdminCreditsList(
+      makeRequest({
+        method: 'GET',
+        headers: OPERATOR_HEADERS,
+        url: 'https://test.local/admin/credits/list',
+      }),
+      env, CORS,
+    ));
+    expect(resp.body.items[0].fingerprint).toBeNull();
+    expect(resp.body.items[0].ip).toBeNull();
+    expect(resp.body.items[0].host).toBeNull();
+    expect(resp.body.items[0].firstSeen).toBeNull();
+  });
+});
+
+describe('admin fingerprint lookup', () => {
+  let env;
+  beforeEach(() => { env = createFakeEnv(); });
+
+  it('returns all clientIds sharing a fingerprint', async () => {
+    const fp = 'sharedfingerprint1';
+    await env.CREDITS.put('client_meta:c1aaaaaaaaaaaaaaaaaaaaaaaaaa', JSON.stringify({
+      fingerprint: fp, ip: '1.1.1.1', host: 'a', firstSeen: '2026-01-01T00:00:00.000Z',
+    }));
+    await env.CREDITS.put('client_meta:c2bbbbbbbbbbbbbbbbbbbbbbbbbb', JSON.stringify({
+      fingerprint: fp, ip: '2.2.2.2', host: 'b', firstSeen: '2026-01-02T00:00:00.000Z',
+    }));
+    await env.CREDITS.put('client_meta:c3cccccccccccccccccccccccccc', JSON.stringify({
+      fingerprint: 'otherfingerprint', ip: '3.3.3.3', host: 'c', firstSeen: '2026-01-03T00:00:00.000Z',
+    }));
+    await env.CREDITS.put('balance:c1aaaaaaaaaaaaaaaaaaaaaaaaaa', '3');
+    await env.CREDITS.put('balance:c2bbbbbbbbbbbbbbbbbbbbbbbbbb', '6');
+
+    const resp = await readResponse(await handleAdminClientLookupByFingerprint(
+      makeRequest({
+        method: 'POST',
+        headers: OPERATOR_HEADERS,
+        body: { fingerprint: fp },
+      }),
+      env, CORS,
+    ));
+
+    expect(resp.status).toBe(200);
+    expect(resp.body.count).toBe(2);
+    const ids = resp.body.matches.map((m) => m.clientId).sort();
+    expect(ids).toEqual([
+      'c1aaaaaaaaaaaaaaaaaaaaaaaaaa',
+      'c2bbbbbbbbbbbbbbbbbbbbbbbbbb',
+    ]);
+    expect(resp.body.matches[0].balance).toBeGreaterThanOrEqual(3);
+  });
+
+  it('returns empty when no match', async () => {
+    const resp = await readResponse(await handleAdminClientLookupByFingerprint(
+      makeRequest({
+        method: 'POST',
+        headers: OPERATOR_HEADERS,
+        body: { fingerprint: 'nonexistent' },
+      }),
+      env, CORS,
+    ));
+    expect(resp.body.count).toBe(0);
+    expect(resp.body.matches).toEqual([]);
+  });
+
+  it('rejects a missing fingerprint', async () => {
+    const resp = await readResponse(await handleAdminClientLookupByFingerprint(
+      makeRequest({ method: 'POST', headers: OPERATOR_HEADERS, body: {} }),
+      env, CORS,
+    ));
+    expect(resp.status).toBe(400);
+  });
+
+  it('requires the operator secret', async () => {
+    await expect(handleAdminClientLookupByFingerprint(
+      makeRequest({
+        method: 'POST',
+        headers: { 'cf-connecting-ip': '10.0.0.1' },
+        body: { fingerprint: 'x' },
       }),
       env, CORS,
     )).rejects.toMatchObject({ status: 401 });
