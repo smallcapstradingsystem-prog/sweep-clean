@@ -10,9 +10,18 @@
  *   - mnemonic: a TronWeb instance built from a derived private key
  *     signs silently, no popup.
  *
- * TronWeb is imported lazily inside the functions that need it. This
- * keeps the module importable in Node (vitest) where `window` and
- * `localStorage` don't exist — tronweb's constructor touches both.
+ * WHY THE IMPORT IS LAZY:
+ *   tronweb's module init reads `window` and `localStorage`. In the
+ *   browser that's fine. In vitest's `node` environment it throws at
+ *   import time, which would break the whole test file. Importing it
+ *   inside the functions that construct it defers that failure to
+ *   the TRON code path, which the tests don't exercise.
+ *
+ *   This does NOT reduce the client bundle size: build.js uses IIFE
+ *   format, and esbuild inlines dynamic imports in IIFE. If you ever
+ *   switch build.js to format: 'esm', the dynamic import becomes a
+ *   real code split and drops ~750 KB from the initial payload. Until
+ *   then, keep it lazy for the tests, not for the bytes.
  *
  * Bridge: deBridge DLN. Chain ID 100000026 verified against a live
  * create-tx call on 2026-09-18. Field shapes:
@@ -39,6 +48,8 @@ const MIN_SWEEP_USDT_RAW = 1_000_000n;
 
 const READ_ONLY_RPC = 'https://api.trongrid.io';
 
+// Cached read-only instance. Only used for balance reads and dry-run
+// quote building — it has no key and cannot sign.
 let _readOnlyTronWeb = null;
 
 async function getReadOnlyTronWeb() {
@@ -53,6 +64,11 @@ async function getReadOnlyTronWeb() {
 // PROVIDER ACCESS
 // =====================================================================
 
+/**
+ * Return the TronLink-injected tronWeb instance, or null if TronLink
+ * is not installed or not yet ready. TronLink supplies its own
+ * TronWeb instance, so this never touches the tronweb library.
+ */
 export function getTronLinkWeb() {
   if (typeof window === 'undefined') return null;
   if (!window.tron || !window.tron.tronWeb) return null;
@@ -71,6 +87,13 @@ export async function connectTronLink() {
   return accounts[0];
 }
 
+/**
+ * Build a signing TronWeb instance from a raw private key.
+ *
+ * Not currently used by main.js — the mnemonic path derives its
+ * signing instance inside derive.js. Kept for callers that need to
+ * construct one ad hoc.
+ */
 export async function tronWebFromPrivateKey(privateKeyHex) {
   const { TronWeb } = await import('tronweb');
   const clean = privateKeyHex.startsWith('0x') ? privateKeyHex.slice(2) : privateKeyHex;
@@ -110,7 +133,8 @@ export async function previewTronWallet(address) {
       });
     }
   } catch (e) {
-    // USDT read failed — empty token list is fine.
+    // USDT read failed — empty token list is fine. The caller shows
+    // a zero balance and the sweep will skip TRON with a note.
   }
 
   return result;
@@ -259,6 +283,11 @@ export async function sweepTron(address, opts = {}) {
 // USD ESTIMATE for the auto-live threshold
 // =====================================================================
 
+/**
+ * TRON holdings are counted at face value for stablecoins. Native TRX
+ * is skipped — it stays in the wallet to cover energy/bandwidth and
+ * is not part of the sweep.
+ */
 export async function estimateTronValueUsdc(preview) {
   if (!preview || !preview.tokens) return 0;
   let total = 0;
