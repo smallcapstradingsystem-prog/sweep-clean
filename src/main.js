@@ -291,17 +291,28 @@ function renderFreeClaimBanner(info) {
     freeClaimTimer = null;
   }
 
+  // Only show the "just claimed" confirmation when it came from the
+  // click handler (info.__fresh is set by the merge in the click
+  // handler below). On a fresh page load, if this client has already
+  // claimed, hide the banner entirely — the credits badge is the
+  // source of truth for the current balance, and a persistent
+  // "3 credits added" message drifts out of sync as soon as those
+  // credits are consumed.
   if (info.claimed) {
-    banner.style.display = '';
-    banner.innerHTML = `
-      <div class="free-claim-inner">
-        <span class="free-claim-icon">✓</span>
-        <div class="free-claim-text">
-          <strong>${info.creditsGranted} free credits added</strong>
-          <p>Your launch bonus is ready to use. Credits never expire.</p>
+    if (info.__fresh) {
+      banner.style.display = '';
+      banner.innerHTML = `
+        <div class="free-claim-inner">
+          <span class="free-claim-icon">✓</span>
+          <div class="free-claim-text">
+            <strong>${info.creditsGranted} free credits added</strong>
+            <p>Your launch bonus is ready to use. Credits never expire.</p>
+          </div>
         </div>
-      </div>
-    `;
+      `;
+    } else {
+      banner.style.display = 'none';
+    }
     return;
   }
 
@@ -414,11 +425,11 @@ function renderFreeClaimBanner(info) {
         const newBalance = await fetchBalance({ force: true });
         updateCreditsBadge(newBalance);
         // Merge the click response over the fresh info so the banner
-        // can render the fingerprint-cap copy immediately. claim-info
-        // doesn't return the fingerprint fields, so without this merge
-        // the banner would only ever see the IP-side state.
+        // can render the fingerprint-cap copy immediately, and tag it
+        // as fresh so the "just claimed" branch fires even on a reload
+        // where claim-info would report claimed: true.
         const freshInfo = await fetchClaimInfo();
-        renderFreeClaimBanner({ ...freshInfo, ...result });
+        renderFreeClaimBanner({ ...freshInfo, ...result, __fresh: true });
       } catch (err) {
         claimBtn.disabled = false;
         claimBtn.textContent = 'Try again';
