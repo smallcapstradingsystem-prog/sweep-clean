@@ -41,6 +41,13 @@
  *   badge shows a countdown while the free pool is live; the banner
  *   shows the same countdown right after a fresh claim.
  *
+ * Wallet type drives the form defaults:
+ *   - mnemonic        → all families and all EVM chains checked;
+ *                       Solana and Bitcoin labels visible.
+ *   - anything else   → EVM only; Solana and Bitcoin labels hidden
+ *                       because that wallet type cannot reach them.
+ *   The same function also toggles the mnemonic security notice.
+ *
  * Retry logic lives in ./retry.js and is injected with its network
  * dependencies here, so the loop mechanics are testable in Node.
  */
@@ -184,6 +191,54 @@ function syncMnemonicNotice() {
   } else {
     notice.style.display = 'none';
   }
+}
+
+/**
+ * Sync the form to match the selected wallet type.
+ *
+ *   mnemonic        → EVM + Solana + Bitcoin family checkboxes are
+ *                     shown and checked; all EVM chain boxes checked.
+ *   everything else → Solana and Bitcoin labels are hidden and their
+ *                     checkboxes forced off (the wallet can't reach
+ *                     those chains); EVM stays checked; all EVM
+ *                     chain boxes checked.
+ *
+ * Runs on every wallet-type change and once on load. Overwrites any
+ * user edits to the family/chain boxes — that's deliberate. See the
+ * main.js header for the reasoning.
+ */
+function syncWalletTypeDefaults() {
+  const walletType = $('input[name=wallet-type]:checked')?.value;
+  const isMnemonic = walletType === 'mnemonic';
+
+  // Family visibility — hide non-EVM families for wallet types that
+  // can't reach them. Showing an unusable checkbox invites the user
+  // to try, then the sweep just skips the family with a log line, and
+  // that's a bad first impression.
+  const solLabel = $('#family-solana-label');
+  const btcLabel = $('#family-bitcoin-label');
+  const hint = $('#family-non-evm-hint');
+  if (solLabel) solLabel.style.display = isMnemonic ? '' : 'none';
+  if (btcLabel) btcLabel.style.display = isMnemonic ? '' : 'none';
+  if (hint) hint.style.display = isMnemonic ? 'none' : '';
+
+  // Family checked state. EVM is always on; Solana and Bitcoin are
+  // only on when the labels are visible.
+  const famEvm = $('#family-evm');
+  const famSol = $('#family-solana');
+  const famBtc = $('#family-bitcoin');
+  if (famEvm) famEvm.checked = true;
+  if (famSol) famSol.checked = isMnemonic;
+  if (famBtc) famBtc.checked = isMnemonic;
+
+  // Every EVM chain checkbox gets checked in both cases.
+  $$('#chain-list input[type=checkbox]').forEach((cb) => {
+    cb.checked = true;
+  });
+
+  // The chain list and destination field visibility depend on the
+  // family checkboxes we just changed, so re-run the sync.
+  syncDestinationFields();
 }
 
 function readInputs() {
@@ -1376,12 +1431,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       showWalletSection(e.target.value);
       hide('#connected-banner');
       syncMnemonicNotice();
+      syncWalletTypeDefaults();
     });
   });
 
   const initialWalletType = $('input[name=wallet-type]:checked')?.value || 'extension';
   showWalletSection(initialWalletType);
   syncMnemonicNotice();
+  syncWalletTypeDefaults();
 
   ['#family-evm', '#family-solana', '#family-bitcoin'].forEach((sel) => {
     const el = $(sel);

@@ -131,9 +131,12 @@
             <h2 style="margin-top:32px;">3. Families</h2>
             <div class="checks">
                 <label><input type="checkbox" id="family-evm" checked> EVM (Ethereum, Arbitrum, Optimism, Base, Polygon, BNB)</label>
-                <label><input type="checkbox" id="family-solana"> Solana</label>
-                <label><input type="checkbox" id="family-bitcoin"> Bitcoin</label>
+                <label id="family-solana-label" style="display:none;"><input type="checkbox" id="family-solana"> Solana</label>
+                <label id="family-bitcoin-label" style="display:none;"><input type="checkbox" id="family-bitcoin"> Bitcoin</label>
             </div>
+            <p class="hint" id="family-non-evm-hint" style="margin-top:8px; font-size: 12px;">
+                Solana and Bitcoin sweeping require a mnemonic. Pick "Paste mnemonic(s)" above to enable them.
+            </p>
 
             <div id="chain-list" style="margin-top:16px;">
                 <h3>EVM chains</h3>
@@ -186,15 +189,15 @@
             <div class="footer-bottom">
                 <p>© 2026 Sweeper Labs. <a href="/">Home</a> · <a href="/guide.html">Guide</a> · <a href="/terms.html">Terms</a> · <a href="/privacy.html">Privacy</a> · <a href="/security-policy.html">Security</a></p>
                 <p style="font-size: 11px; color: #8b949e; margin-top: 12px;">
-                    Built 2026-09-18T03:41:02.528Z · bundle d226bc51c460ca47fb396964d92635cdc076b29cd03614481fcc8857e6b3c4a1 · 5456.9 KB
+                    Built 2026-09-18T03:56:02.974Z · bundle 20792644819244c5e93ff9c76462a7ae5f922ff3837301105dcf98d23ca6a24c · 5457.3 KB
                 </p>
             </div>
         </div>
     </footer>
 
     <script>
-        window.__SWEEP_RELEASE__ = "d226bc51c460ca47fb396964d92635cdc076b29cd03614481fcc8857e6b3c4a1".slice(0, 12);
+        window.__SWEEP_RELEASE__ = "20792644819244c5e93ff9c76462a7ae5f922ff3837301105dcf98d23ca6a24c".slice(0, 12);
     </script>
-    <script src="app.js" integrity="sha384-WLsLZvmLpP8/eHkSGqRUpLv59daehANtJEcRAqCcD/ceaN4PQ4RHQsVelz8PVUWd" crossorigin="anonymous"></script>
+    <script src="app.js" integrity="sha384-AtVb8R3Xt6fKqPNRsI3B/4r7mKdgPH6uXgO0hK2egrXaV1RWZa7AjtWggum+kGJ5" crossorigin="anonymous"></script>
 </body>
 </html>

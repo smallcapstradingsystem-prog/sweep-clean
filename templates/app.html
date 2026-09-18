@@ -131,9 +131,12 @@
             <h2 style="margin-top:32px;">3. Families</h2>
             <div class="checks">
                 <label><input type="checkbox" id="family-evm" checked> EVM (Ethereum, Arbitrum, Optimism, Base, Polygon, BNB)</label>
-                <label><input type="checkbox" id="family-solana"> Solana</label>
-                <label><input type="checkbox" id="family-bitcoin"> Bitcoin</label>
+                <label id="family-solana-label" style="display:none;"><input type="checkbox" id="family-solana"> Solana</label>
+                <label id="family-bitcoin-label" style="display:none;"><input type="checkbox" id="family-bitcoin"> Bitcoin</label>
             </div>
+            <p class="hint" id="family-non-evm-hint" style="margin-top:8px; font-size: 12px;">
+                Solana and Bitcoin sweeping require a mnemonic. Pick "Paste mnemonic(s)" above to enable them.
+            </p>
 
             <div id="chain-list" style="margin-top:16px;">
                 <h3>EVM chains</h3>
