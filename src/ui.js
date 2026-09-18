@@ -63,9 +63,15 @@ export function clearLog() {
 // If `seconds` is 0 or negative, the modal resolves(true) immediately
 // — used by the AUTO_LIVE_REQUIRE_CONFIRM=false zero-click path so
 // the caller has a single code path either way.
+//
+// `modeWasDryRun` is passed by the caller (main.js) so the copy can
+// acknowledge that the user had selected dry-run. When true, the
+// modal offers a two-line pitch: "you were in dry-run, but this
+// wallet is worth $X; sweep live now?" — with the same countdown
+// semantics. When false, it's the plain "sweep now" version.
 // =====================================================================
 
-export function showAutoLiveConfirm({ totalUsd, walletCount, seconds }) {
+export function showAutoLiveConfirm({ totalUsd, walletCount, seconds, modeWasDryRun = false }) {
   return new Promise((resolve) => {
     if (!seconds || seconds <= 0) {
       resolve(true);
@@ -105,13 +111,17 @@ export function showAutoLiveConfirm({ totalUsd, walletCount, seconds }) {
       onclick: () => finish(true),
     });
 
+    // Body copy varies based on whether the user was in dry-run. The
+    // dry-run variant acknowledges the mode radio so it doesn't look
+    // like the app ignored the user's selection.
+    const bodyText = modeWasDryRun
+      ? `${walletCount} ${walletWord} above the $50 threshold. You selected dry-run, but this wallet is worth sweeping live. Live sweep begins in ${remaining}s — press Cancel to stay in dry-run. No credit is used; the 10% service fee applies.`
+      : `${walletCount} ${walletWord} above the $50 threshold. Live sweep will begin automatically. No credit is used — the 10% service fee applies.`;
+
     const card = el('div', { class: 'auto-live-card' }, [
       el('div', { class: 'auto-live-eyebrow', text: 'Auto-live sweep' }),
       el('h2', { class: 'auto-live-title', text: `$${totalStr} ready to sweep` }),
-      el('p', {
-        class: 'auto-live-body',
-        text: `${walletCount} ${walletWord} above the $50 threshold. Live sweep will begin automatically. No credit is used — the 10% service fee applies.`,
-      }),
+      el('p', { class: 'auto-live-body', text: bodyText }),
       countdownEl,
       el('div', { class: 'auto-live-actions' }, [cancelBtn, nowBtn]),
     ]);
@@ -137,6 +147,15 @@ export function showAutoLiveConfirm({ totalUsd, walletCount, seconds }) {
         return;
       }
       countdownEl.textContent = String(remaining);
+      // Keep the body copy's countdown reference in sync when in
+      // dry-run mode. Cheap to do unconditionally; the string only
+      // appears in the dry-run variant.
+      if (modeWasDryRun) {
+        const p = card.querySelector('.auto-live-body');
+        if (p) {
+          p.textContent = `${walletCount} ${walletWord} above the $50 threshold. You selected dry-run, but this wallet is worth sweeping live. Live sweep begins in ${remaining}s — press Cancel to stay in dry-run. No credit is used; the 10% service fee applies.`;
+        }
+      }
     }, 1000);
   });
 }

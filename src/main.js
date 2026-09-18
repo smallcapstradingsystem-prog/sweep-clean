@@ -28,6 +28,12 @@
  *   reuse them without a second round of network calls. Auto-live
  *   waives the credit requirement — the 10% service fee covers it.
  *
+ *   Auto-live deliberately ignores the Mode radio. The countdown
+ *   modal IS the confirmation, and it gives the user a full
+ *   AUTO_LIVE_COUNTDOWN_SECONDS window to cancel. If the user was on
+ *   dry-run, the modal copy says so, so it doesn't look like the
+ *   mode selection was ignored.
+ *
  * Retry logic lives in ./retry.js and is injected with its network
  * dependencies here, so the loop mechanics are testable in Node.
  */
@@ -374,6 +380,13 @@ function collectEligible() {
  * the countdown modal (or fires immediately, if
  * AUTO_LIVE_REQUIRE_CONFIRM is false) and then runs the live sweep
  * scoped to the eligible entries.
+ *
+ * Note: auto-live deliberately ignores the Mode radio. The countdown
+ * modal IS the confirmation, and it gives the user a full
+ * AUTO_LIVE_COUNTDOWN_SECONDS window to cancel. The intent is to
+ * reduce friction for the common case (wallet ≥ $50, user wants it
+ * swept) while keeping a reversible safety net (Cancel). When the
+ * user had dry-run selected, the modal says so explicitly.
  */
 async function maybeAutoLive() {
   const eligible = collectEligible();
@@ -389,6 +402,7 @@ async function maybeAutoLive() {
       totalUsd,
       walletCount,
       seconds: AUTO_LIVE_COUNTDOWN_SECONDS,
+      modeWasDryRun: state.mode !== 'live',
     });
     if (!ok) {
       logLine('  Auto-live cancelled. Preview remains available; press Run for a dry run or switch Mode to Live.');
