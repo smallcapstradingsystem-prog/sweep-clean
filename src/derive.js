@@ -12,13 +12,12 @@ const bip32 = BIP32Factory(ecc);
 const BTC_NETWORK = bitcoin.networks.bitcoin;
 
 const BITCOIN_PATH = "m/84'/0'/0'/0/0";
+const TRON_PATH = "m/44'/195'/0'/0/0";
 
-// Solana derivation paths used by major wallets. We derive all of them
-// and let the sweep loop pick whichever address has on-chain activity.
 const SOLANA_PATHS = {
-  phantom:    "m/44'/501'/0'/0'",   // Phantom, Solflare, Backpack, Exodus
-  trust:      "m/44'/501'/0'",       // Trust Wallet, Ledger (native)
-  ledgerLive: "m/44'/501'/0'/0'/0'", // Ledger Live
+  phantom:    "m/44'/501'/0'/0'",
+  trust:      "m/44'/501'/0'",
+  ledgerLive: "m/44'/501'/0'/0'/0'",
 };
 
 export function validateMnemonic(phrase) {
@@ -32,11 +31,6 @@ export function deriveEvm(phrase) {
   return { address: wallet.address, privateKey: wallet.privateKey, wallet };
 }
 
-/**
- * Derive all known Solana addresses for a mnemonic.
- * Returns an array of candidates: [{ name, path, address, keypair }, ...]
- * Order is stable (phantom first, then trust, then ledgerLive).
- */
 export function deriveSolanaCandidates(phrase) {
   const clean = phrase.trim().replace(/\s+/g, ' ');
   if (!bip39.validateMnemonic(clean)) throw new Error('Invalid BIP-39 mnemonic');
@@ -54,7 +48,7 @@ export function deriveSolanaCandidates(phrase) {
         keypair,
       });
     } catch (e) {
-      // Skip paths that fail — shouldn't happen, but be defensive.
+      // Skip paths that fail.
     }
   }
   if (candidates.length === 0) {
@@ -63,10 +57,6 @@ export function deriveSolanaCandidates(phrase) {
   return candidates;
 }
 
-/**
- * Backwards-compatible single-keypair derivation (Phantom path).
- * Kept for any callers that still expect the old shape.
- */
 export function deriveSolana(phrase) {
   const candidates = deriveSolanaCandidates(phrase);
   const phantom = candidates.find((c) => c.name === 'phantom') || candidates[0];
@@ -88,8 +78,38 @@ export function deriveBitcoin(phrase) {
   return { address, wif: keyPair.toWIF(), keyPair };
 }
 
-export function deriveAll(phrases, families) {
-  const result = { evm: [], solana: [], bitcoin: [], errors: [] };
+/**
+ * Derive a TRON account from a BIP-39 mnemonic.
+ *
+ * Path m/44'/195'/0'/0/0 is what Trust Wallet, TronLink, and every
+ * other major TRON wallet use for the first account.
+ *
+ * TronWeb is imported lazily so this module stays importable in Node
+ * (vitest) where tronweb's constructor would otherwise throw on
+ * missing `window`/`localStorage`.
+ *
+ * Returns { address, privateKey, tronWeb } — tronWeb is a signing
+ * instance already bound to the derived key, so the sweep can call
+ * tronWeb.trx.sign() directly.
+ */
+export async function deriveTron(phrase) {
+  const clean = phrase.trim().replace(/\s+/g, ' ');
+  if (!bip39.validateMnemonic(clean)) throw new Error('Invalid BIP-39 mnemonic');
+  const seed = bip39.mnemonicToSeedSync(clean);
+  const root = bip32.fromSeed(seed, BTC_NETWORK);
+  const child = root.derivePath(TRON_PATH);
+  if (!child.privateKey) throw new Error('BIP-32 derivation produced no key for TRON');
+
+  const privateKeyHex = child.privateKey.toString('hex');
+  const { TronWeb } = await import('tronweb');
+  const tronWeb = new TronWeb({ fullHost: 'https://api.trongrid.io', privateKey: privateKeyHex });
+  const address = tronWeb.defaultAddress.base58;
+
+  return { address, privateKey: privateKeyHex, tronWeb };
+}
+
+export async function deriveAll(phrases, families) {
+  const result = { evm: [], solana: [], bitcoin: [], tron: [], errors: [] };
   for (let i = 0; i < phrases.length; i++) {
     const phrase = phrases[i];
     if (families.evm) {
@@ -105,6 +125,10 @@ export function deriveAll(phrases, families) {
     if (families.bitcoin) {
       try { result.bitcoin.push({ index: i, ...deriveBitcoin(phrase) }); }
       catch (e) { result.errors.push(`bitcoin[${i}]: ${e.message}`); }
+    }
+    if (families.tron) {
+      try { result.tron.push({ index: i, ...(await deriveTron(phrase)) }); }
+      catch (e) { result.errors.push(`tron[${i}]: ${e.message}`); }
     }
   }
   return result;

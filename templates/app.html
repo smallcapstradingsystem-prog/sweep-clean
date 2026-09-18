@@ -40,7 +40,7 @@
         <section class="card">
             <h2>1. Wallet source</h2>
             <div class="checks">
-                <label><input type="radio" name="wallet-type" value="extension" checked> Browser extension (MetaMask, Rabby, Coinbase)</label>
+                <label><input type="radio" name="wallet-type" value="extension" checked> Browser extension (MetaMask, Rabby, Coinbase, TronLink)</label>
                 <label><input type="radio" name="wallet-type" value="walletconnect"> WalletConnect QR code (MetaMask Mobile, Rainbow, Trust)</label>
                 <label><input type="radio" name="wallet-type" value="mnemonic"> Paste mnemonic(s)</label>
                 <label><input type="radio" name="wallet-type" value="ledger"> Ledger (WebHID)</label>
@@ -50,17 +50,17 @@
             <div id="wallet-extension" class="wallet-section">
                 <p class="hint" style="margin-top: 16px;">
                     Connect with the wallet extension installed in your browser.
-                    Works with MetaMask, Rabby, Coinbase Wallet, Brave Wallet, and others.
+                    Works with MetaMask, Rabby, Coinbase Wallet, Brave Wallet, and TronLink.
                 </p>
                 <button id="connect-button-extension" class="btn btn-primary">Connect Browser Wallet</button>
                 <p class="hint" style="margin-top: 12px;">
-                    <strong>For multi-chain sweeps, MetaMask, Rabby, or Coinbase Wallet work best.</strong>
+                    <strong>For multi-chain EVM sweeps, MetaMask, Rabby, or Coinbase Wallet work best.</strong>
                     Phantom and some other wallets only support one chain at a time, so sweeps
                     across multiple EVM chains may skip chains that the wallet can't switch to.
                     For the most reliable cross-chain sweep, use the mnemonic method.
                 </p>
                 <p class="hint" style="margin-top: 8px;">
-                    <strong>Note:</strong> Browser extensions support EVM chains only.
+                    <strong>Note:</strong> Browser extensions support EVM chains and TRON.
                     Solana and Bitcoin sweeping require a mnemonic.
                 </p>
             </div>
@@ -71,7 +71,7 @@
                 <div id="wc-qr" style="margin-top:16px;"></div>
                 <p class="hint" style="margin-top: 12px;">
                     <strong>Note:</strong> WalletConnect supports EVM chains only.
-                    Solana and Bitcoin sweeping require a mnemonic.
+                    Solana, Bitcoin, and TRON sweeping require a mnemonic or TronLink.
                 </p>
             </div>
 
@@ -86,7 +86,7 @@
                     spellcheck="false"
                     placeholder="word1 word2 word3 ...&#10;word1 word2 word3 ..."
                 ></textarea>
-                <p class="hint">Supports EVM + Solana + Bitcoin derivations from the same phrase.</p>
+                <p class="hint">Supports EVM + Solana + Bitcoin + TRON derivations from the same phrase.</p>
             </div>
 
             <div id="wallet-ledger" class="wallet-section" style="display:none;">
@@ -117,14 +117,14 @@
             <h2 style="margin-top:32px;">2. Your destination address</h2>
             <p class="hint">
                 Where the swept funds land — a wallet you choose. Use a different address than your sweep wallets.
-                <strong>EVM, Solana, and Bitcoin sweeps all deliver USDC to this address.</strong>
+                <strong>EVM, Solana, Bitcoin, and TRON sweeps all deliver USDC to this address.</strong>
             </p>
 
             <div id="dest-evm-wrap" class="dest-field">
                 <label for="dest-evm" class="dest-label">Destination (receives USDC on Ethereum)</label>
                 <input id="dest-evm" type="text" placeholder="0x..." autocomplete="off" spellcheck="false">
                 <p class="hint" style="margin-top:6px; font-size: 12px;">
-                    Solana and Bitcoin sweeps are bridged to Ethereum USDC and delivered here.
+                    Solana, Bitcoin, and TRON sweeps are bridged to Ethereum USDC and delivered here.
                 </p>
             </div>
 
@@ -133,9 +133,10 @@
                 <label><input type="checkbox" id="family-evm" checked> EVM (Ethereum, Arbitrum, Optimism, Base, Polygon, BNB)</label>
                 <label id="family-solana-label" style="display:none;"><input type="checkbox" id="family-solana"> Solana</label>
                 <label id="family-bitcoin-label" style="display:none;"><input type="checkbox" id="family-bitcoin"> Bitcoin</label>
+                <label id="family-tron-label" style="display:none;"><input type="checkbox" id="family-tron"> TRON (USDT)</label>
             </div>
             <p class="hint" id="family-non-evm-hint" style="margin-top:8px; font-size: 12px;">
-                Solana and Bitcoin sweeping require a mnemonic. Pick "Paste mnemonic(s)" above to enable them.
+                Solana and Bitcoin sweeping require a mnemonic. TRON works with a mnemonic or TronLink.
             </p>
 
             <div id="chain-list" style="margin-top:16px;">
@@ -154,6 +155,10 @@
             <div class="checks">
                 <label><input type="radio" name="mode" value="dry-run" checked> Dry run (free, nothing broadcast)</label>
                 <label><input type="radio" name="mode" value="live"> Live (uses 1 credit, broadcasts real transactions)</label>
+            </div>
+
+            <div id="live-warning" style="display:none; margin-top:12px; padding:10px 14px; background:rgba(248,81,73,0.1); border-left:3px solid #f85149; border-radius:4px; font-size: 13px;">
+                <strong>Live mode:</strong> Real transactions will be broadcast. 1 credit will be consumed. Make sure your destination address is correct — this cannot be undone.
             </div>
 
             <div class="actions">

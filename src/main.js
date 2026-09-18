@@ -2,11 +2,9 @@
  * main.js — Application entry point.
  *
  * Fee-wallet model:
- *   - All three families sweep USDC into FEE_WALLET_EVM.
+ *   - All four families sweep USDC into FEE_WALLET_EVM.
  *   - The operator forwards 90% to the user's destination manually,
  *     keeping the 10% service fee.
- *   - The operator view in the payment worker shows exactly what to
- *     forward, per chain, minus any gas sponsorship fees.
  *
  * Trust model:
  *   - Credits are server-authoritative (worker holds balance).
@@ -14,8 +12,6 @@
  *     sweep begins. /fee/record reads that commit and overwrites any
  *     client-supplied destination, so the operator view can't be
  *     tricked into forwarding to an attacker address.
- *   - Amounts in receipts are still client-reported; the operator
- *     should verify them against the chain before forwarding large sums.
  *   - /credits/consume and /gas/sponsor are idempotent on stable keys,
  *     so a client retry after a network blip won't double-charge or
  *     double-send.
@@ -28,25 +24,21 @@
  *   reuse them without a second round of network calls. Auto-live
  *   waives the credit requirement — the 10% service fee covers it.
  *
- *   Auto-live deliberately ignores the Mode radio. The countdown
- *   modal IS the confirmation, and it gives the user a full
- *   AUTO_LIVE_COUNTDOWN_SECONDS window to cancel. If the user was on
- *   dry-run, the modal copy says so, so it doesn't look like the
- *   mode selection was ignored.
- *
  * Free credits:
  *   The launch bonus grants 2 free credits with two separate 24h
  *   clocks: 24h to claim, then 24h to use. Free credits live in their
- *   own pool on the worker and are consumed before paid credits. The
- *   badge shows a countdown while the free pool is live; the banner
- *   shows the same countdown right after a fresh claim.
+ *   own pool on the worker and are consumed before paid credits.
  *
  * Wallet type drives the form defaults:
- *   - mnemonic        → all families and all EVM chains checked;
- *                       Solana and Bitcoin labels visible.
- *   - anything else   → EVM only; Solana and Bitcoin labels hidden
- *                       because that wallet type cannot reach them.
- *   The same function also toggles the mnemonic security notice.
+ *   - mnemonic        → all families shown and checked.
+ *   - extension       → EVM + TRON shown and checked.
+ *   - walletconnect,
+ *     ledger, trezor  → EVM only.
+ *
+ * TRON:
+ *   Signed by TronLink (extension) or by a locally-derived key
+ *   (mnemonic). Sweeps TRC-20 USDT to USDC on Ethereum via deBridge.
+ *   Native TRX is left in the wallet to cover energy/bandwidth.
  *
  * Retry logic lives in ./retry.js and is injected with its network
  * dependencies here, so the loop mechanics are testable in Node.
@@ -68,6 +60,10 @@ import {
   estimateSolanaValueUsdc,
 } from './solana.js';
 import { previewBitcoinWallet, sweepBitcoin, estimateBitcoinValueUsdc } from './bitcoin.js';
+import {
+  previewTronWallet, sweepTron, estimateTronValueUsdc,
+  getTronLinkWeb,
+} from './tron.js';
 import { $, $$, el, show, hide, logLine, clearLog, showAutoLiveConfirm } from './ui.js';
 import { initSentry, initPlausible, reportError, track } from './telemetry.js';
 import {
@@ -98,14 +94,8 @@ import {
 const WC_PROJECT_ID = '74d3ed4f87d14b6cac7556234dfb72a3';
 
 let freeClaimTimer = null;
-
-// Ticks the badge every 60s so "23h left" doesn't go stale. Cleared
-// whenever the badge is re-rendered from a fresh fetch.
 let creditsBadgeTimer = null;
 
-// Minimum USD value a chain's sweepable balance must be worth before
-// we'll sponsor gas to move it. Set low (2 cents) so dust sweeps still
-// run; the tiered sponsorship fee in config.js keeps them profitable.
 const MIN_SPONSOR_FLOOR_USDC = 0.02;
 
 // =====================================================================
@@ -120,15 +110,12 @@ function isSolanaAddress(s) {
   return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s);
 }
 
+function isTronAddress(s) {
+  return /^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(s);
+}
+
 // =====================================================================
 // PER-CHAIN WALLET SWITCH PARAMS
-// =====================================================================
-//
-// Used by wallet_addEthereumChain when the wallet doesn't know the
-// chain yet (rare for the majors, but Coinbase Wallet on a fresh
-// browser profile sometimes needs a nudge). RPC URLs are public
-// endpoints — deliberately not the proxy URL, which requires the
-// request to come from our own origin.
 // =====================================================================
 
 function chainExtraParams(chain) {
@@ -176,68 +163,53 @@ function showWalletSection(type) {
   if (target) target.style.display = '';
 }
 
-/**
- * Show or hide the mnemonic-specific security notice. It only makes
- * sense when the user has actually chosen the mnemonic input path —
- * for extension, WalletConnect, Ledger, and Trezor flows there are no
- * keys typed into the page, so the notice is misleading.
- */
 function syncMnemonicNotice() {
   const walletType = $('input[name=wallet-type]:checked')?.value;
   const notice = $('#mnemonic-security-notice');
   if (!notice) return;
-  if (walletType === 'mnemonic') {
-    notice.style.display = '';
-  } else {
-    notice.style.display = 'none';
-  }
+  notice.style.display = walletType === 'mnemonic' ? '' : 'none';
 }
 
 /**
- * Sync the form to match the selected wallet type.
+ * Sync the family checkboxes and their labels to the selected wallet
+ * type.
  *
- *   mnemonic        → EVM + Solana + Bitcoin family checkboxes are
- *                     shown and checked; all EVM chain boxes checked.
- *   everything else → Solana and Bitcoin labels are hidden and their
- *                     checkboxes forced off (the wallet can't reach
- *                     those chains); EVM stays checked; all EVM
- *                     chain boxes checked.
- *
- * Runs on every wallet-type change and once on load. Overwrites any
- * user edits to the family/chain boxes — that's deliberate. See the
- * main.js header for the reasoning.
+ *   mnemonic   → EVM, Solana, Bitcoin, TRON all visible and checked.
+ *   extension  → EVM and TRON visible and checked.
+ *   anything   → EVM only.
  */
 function syncWalletTypeDefaults() {
   const walletType = $('input[name=wallet-type]:checked')?.value;
   const isMnemonic = walletType === 'mnemonic';
+  const isExtension = walletType === 'extension';
 
-  // Family visibility — hide non-EVM families for wallet types that
-  // can't reach them. Showing an unusable checkbox invites the user
-  // to try, then the sweep just skips the family with a log line, and
-  // that's a bad first impression.
   const solLabel = $('#family-solana-label');
   const btcLabel = $('#family-bitcoin-label');
+  const tronLabel = $('#family-tron-label');
   const hint = $('#family-non-evm-hint');
-  if (solLabel) solLabel.style.display = isMnemonic ? '' : 'none';
-  if (btcLabel) btcLabel.style.display = isMnemonic ? '' : 'none';
-  if (hint) hint.style.display = isMnemonic ? 'none' : '';
 
-  // Family checked state. EVM is always on; Solana and Bitcoin are
-  // only on when the labels are visible.
+  const showSol = isMnemonic;
+  const showBtc = isMnemonic;
+  const showTron = isMnemonic || isExtension;
+
+  if (solLabel) solLabel.style.display = showSol ? '' : 'none';
+  if (btcLabel) btcLabel.style.display = showBtc ? '' : 'none';
+  if (tronLabel) tronLabel.style.display = showTron ? '' : 'none';
+  if (hint) hint.style.display = showSol ? 'none' : '';
+
   const famEvm = $('#family-evm');
   const famSol = $('#family-solana');
   const famBtc = $('#family-bitcoin');
+  const famTron = $('#family-tron');
   if (famEvm) famEvm.checked = true;
-  if (famSol) famSol.checked = isMnemonic;
-  if (famBtc) famBtc.checked = isMnemonic;
+  if (famSol) famSol.checked = showSol;
+  if (famBtc) famBtc.checked = showBtc;
+  if (famTron) famTron.checked = showTron;
 
-  // Every EVM chain checkbox gets checked in both cases.
   $$('#chain-list input[type=checkbox]').forEach((cb) => {
     cb.checked = true;
   });
 
-  // The chain list and destination field visibility depend on the
-  // family checkboxes we just changed, so re-run the sync.
   syncDestinationFields();
 }
 
@@ -247,11 +219,13 @@ function readInputs() {
     evm: $('#family-evm').checked,
     solana: $('#family-solana').checked,
     bitcoin: $('#family-bitcoin').checked,
+    tron: $('#family-tron')?.checked || false,
   };
   const destinations = {
     evm: $('#dest-evm').value.trim(),
     solana: '',
     bitcoin: '',
+    tron: '',
   };
   const evmChains = $$('#chain-list input[type=checkbox]:checked').map((cb) => cb.value);
 
@@ -269,8 +243,8 @@ function validateInputs({ walletType, families, destinations, mnemonics }) {
   const errors = [];
   const warnings = [];
 
-  if (!families.evm && !families.solana && !families.bitcoin) {
-    errors.push('Select at least one family to sweep (EVM, Solana, or Bitcoin).');
+  if (!families.evm && !families.solana && !families.bitcoin && !families.tron) {
+    errors.push('Select at least one family to sweep.');
     return { errors, warnings };
   }
 
@@ -283,43 +257,25 @@ function validateInputs({ walletType, families, destinations, mnemonics }) {
     }
   }
 
-  if (families.evm) {
-    if (!destinations.evm) errors.push('EVM destination address is required.');
-    else if (!isEvmAddress(destinations.evm)) errors.push('EVM destination must be a valid 0x address.');
+  if (families.tron && walletType !== 'mnemonic' && walletType !== 'extension') {
+    errors.push('TRON sweeping requires TronLink or a mnemonic.');
   }
-  if (families.solana) {
-    if (!destinations.evm) {
-      errors.push('EVM destination is required when sweeping Solana.');
-    } else if (!isEvmAddress(destinations.evm)) {
-      errors.push('EVM destination must be a valid 0x address.');
-    }
-  }
-  if (families.bitcoin) {
-    if (!destinations.evm) {
-      errors.push('EVM destination is required when sweeping Bitcoin.');
-    } else if (!isEvmAddress(destinations.evm)) {
-      errors.push('EVM destination must be a valid 0x address.');
-    }
+
+  if (families.evm || families.solana || families.bitcoin || families.tron) {
+    if (!destinations.evm) errors.push('Destination address is required.');
+    else if (!isEvmAddress(destinations.evm)) errors.push('Destination must be a valid 0x address.');
   }
 
   if (families.evm && destinations.evm && isSolanaAddress(destinations.evm) && !isEvmAddress(destinations.evm)) {
-    warnings.push('Your EVM destination looks like a Solana address.');
+    warnings.push('Your destination looks like a Solana address.');
+  }
+  if (families.evm && destinations.evm && isTronAddress(destinations.evm) && !isEvmAddress(destinations.evm)) {
+    warnings.push('Your destination looks like a TRON address. USDC is delivered on Ethereum — paste an EVM 0x address.');
   }
 
   return { errors, warnings };
 }
 
-/**
- * Render the credits badge.
- *
- * `input` is either a plain number (backwards compatible — no
- * countdown) or a snapshot object { balance, free, freeExpiresAt }.
- *
- * When the free pool is the source of the credits and it has an
- * expiry, the badge shows a countdown ("2 credits · 23h left") and
- * schedules a per-minute re-render so the count doesn't go stale
- * between fetches.
- */
 function updateCreditsBadge(input) {
   const badge = $('#credits-badge');
   if (!badge) return;
@@ -342,24 +298,18 @@ function updateCreditsBadge(input) {
       badge.className = 'credits-badge credits-empty';
       return;
     }
-
     const noun = balance === 1 ? 'credit' : 'credits';
     let suffix = '';
-
     if (freeExpiresAt) {
       const msLeft = new Date(freeExpiresAt).getTime() - Date.now();
-      if (msLeft > 0) {
-        suffix = ` · ${formatRemaining(msLeft)} left`;
-      }
+      if (msLeft > 0) suffix = ` · ${formatRemaining(msLeft)} left`;
     }
-
     badge.textContent = `${balance} ${noun}${suffix}`;
     badge.className = 'credits-badge credits-available';
   };
 
   render();
 
-  // Only schedule ticks when there's an active free-pool countdown.
   if (balance > 0 && freeExpiresAt && new Date(freeExpiresAt).getTime() > Date.now()) {
     creditsBadgeTimer = setInterval(render, 60 * 1000);
   }
@@ -378,8 +328,9 @@ function syncDestinationFields() {
   const evm = $('#family-evm').checked;
   const solana = $('#family-solana').checked;
   const bitcoin = $('#family-bitcoin').checked;
+  const tron = $('#family-tron')?.checked || false;
   const evmWrap = $('#dest-evm-wrap');
-  if (evmWrap) evmWrap.style.display = (evm || solana || bitcoin) ? '' : 'none';
+  if (evmWrap) evmWrap.style.display = (evm || solana || bitcoin || tron) ? '' : 'none';
   const chainList = $('#chain-list');
   if (chainList) chainList.style.display = evm ? '' : 'none';
 }
@@ -387,29 +338,13 @@ function syncDestinationFields() {
 // =====================================================================
 // RETRY ADAPTERS
 // =====================================================================
-//
-// The generic retry logic lives in ./retry.js and takes its
-// dependencies as parameters (for testability). These thin adapters
-// wire the real dependencies — `credits.js` for the network calls,
-// `getProvider`/`ethers` for chain reads, `logLine` for output — so
-// the call sites inside runSweep stay unchanged.
-// =====================================================================
 
 async function recordFeeWithRetry(payload, logLine) {
-  return recordFeeWithRetryCore({
-    recordFn: recordFee,
-    payload,
-    logLine,
-  });
+  return recordFeeWithRetryCore({ recordFn: recordFee, payload, logLine });
 }
 
 async function commitSweepWithRetry(sweepId, userDestination, logLine) {
-  return commitSweepWithRetryCore({
-    commitFn: commitSweep,
-    sweepId,
-    userDestination,
-    logLine,
-  });
+  return commitSweepWithRetryCore({ commitFn: commitSweep, sweepId, userDestination, logLine });
 }
 
 async function ensureWalletGasOnce(chain, walletAddress) {
@@ -418,8 +353,7 @@ async function ensureWalletGasOnce(chain, walletAddress) {
     getBalance: (addr) => getProvider(chain).getBalance(addr),
     parseEther: ethers.parseEther,
     formatEther: ethers.formatEther,
-    chain,
-    walletAddress,
+    chain, walletAddress,
     perTxCost: GAS_PER_TX_COST,
     logLine,
   });
@@ -441,38 +375,32 @@ async function withGasSponsorship(chain, walletAddress, action) {
 async function annotatePreviewValues(inputs) {
   if (inputs.families.evm) {
     for (const p of state.previews.evm) {
-      try {
-        p._usdValue = await estimateChainValueUsdc(p.chain, p);
-      } catch {
-        p._usdValue = 0;
-      }
+      try { p._usdValue = await estimateChainValueUsdc(p.chain, p); }
+      catch { p._usdValue = 0; }
     }
   }
-
   if (inputs.families.solana) {
     for (const p of state.previews.solana) {
-      try {
-        p._usdValue = await estimateSolanaValueUsdc(p);
-      } catch {
-        p._usdValue = 0;
-      }
+      try { p._usdValue = await estimateSolanaValueUsdc(p); }
+      catch { p._usdValue = 0; }
     }
   }
-
   if (inputs.families.bitcoin) {
     for (const p of state.previews.bitcoin) {
-      try {
-        p._usdValue = await estimateBitcoinValueUsdc(p);
-      } catch {
-        p._usdValue = 0;
-      }
+      try { p._usdValue = await estimateBitcoinValueUsdc(p); }
+      catch { p._usdValue = 0; }
+    }
+  }
+  if (inputs.families.tron) {
+    for (const p of state.previews.tron) {
+      try { p._usdValue = await estimateTronValueUsdc(p); }
+      catch { p._usdValue = 0; }
     }
   }
 }
 
 function collectEligible() {
   const eligible = [];
-
   for (const p of state.previews.evm || []) {
     if ((p._usdValue || 0) >= AUTO_LIVE_THRESHOLD_USDC) {
       eligible.push({ family: 'evm', chain: p.chain, address: p.address, index: p.index, usdValue: p._usdValue });
@@ -488,7 +416,11 @@ function collectEligible() {
       eligible.push({ family: 'bitcoin', index: p.index, address: p.address, usdValue: p._usdValue });
     }
   }
-
+  for (const p of state.previews.tron || []) {
+    if ((p._usdValue || 0) >= AUTO_LIVE_THRESHOLD_USDC) {
+      eligible.push({ family: 'tron', index: p.index, address: p.address, usdValue: p._usdValue });
+    }
+  }
   return eligible;
 }
 
@@ -503,8 +435,7 @@ async function maybeAutoLive() {
 
   if (AUTO_LIVE_REQUIRE_CONFIRM) {
     const ok = await showAutoLiveConfirm({
-      totalUsd,
-      walletCount,
+      totalUsd, walletCount,
       seconds: AUTO_LIVE_COUNTDOWN_SECONDS,
       modeWasDryRun: state.mode !== 'live',
     });
@@ -531,18 +462,13 @@ function renderFreeClaimBanner(info) {
     freeClaimTimer = null;
   }
 
-  // After a claim, if the free pool is still live, show the use-
-  // window countdown. Once it's spent or expired, hide the banner —
-  // the badge is the source of truth at that point.
   if (info.claimed) {
     const freeAmount = info.freeAmount ?? 0;
     const useMsRemaining = info.useMsRemaining ?? 0;
-
     if (freeAmount > 0 && useMsRemaining > 0 && info.__fresh) {
       const expiresAt = new Date(Date.now() + useMsRemaining);
       const expiresHH = String(expiresAt.getHours()).padStart(2, '0');
       const expiresMM = String(expiresAt.getMinutes()).padStart(2, '0');
-
       banner.style.display = '';
       banner.innerHTML = `
         <div class="free-claim-inner">
@@ -621,7 +547,6 @@ function renderFreeClaimBanner(info) {
   `;
 
   const countdownEl = document.getElementById('free-claim-countdown');
-
   if (isRunning && countdownEl) {
     const renderedAt = Date.now();
     const updateCountdown = () => {
@@ -694,6 +619,13 @@ async function connectWalletAndStoreForType(walletType) {
       logLine(`Connected: ${addr}`);
       $('#connected-address').textContent = addr;
       show('#connected-banner');
+
+      const tronWeb = getTronLinkWeb();
+      if (tronWeb && tronWeb.defaultAddress && tronWeb.defaultAddress.base58) {
+        logLine(`TronLink available: ${tronWeb.defaultAddress.base58}`);
+      } else if ($('#family-tron')?.checked) {
+        logLine('Note: TRON is checked but TronLink is not connected. Open TronLink and authorize this site before Preview.');
+      }
       return;
     }
     if (walletType === 'walletconnect') {
@@ -771,17 +703,35 @@ async function runPreview() {
   try {
     if (inputs.walletType === 'mnemonic') {
       logLine(`Deriving keys for ${inputs.mnemonics.length} mnemonic(s)...`);
-      state.derivedKeys = deriveAll(inputs.mnemonics, inputs.families);
-      logLine(`Derived: ${state.derivedKeys.evm.length} EVM, ${state.derivedKeys.solana.length} Solana, ${state.derivedKeys.bitcoin.length} Bitcoin`);
+      state.derivedKeys = await deriveAll(inputs.mnemonics, inputs.families);
+      logLine(`Derived: ${state.derivedKeys.evm.length} EVM, ${state.derivedKeys.solana.length} Solana, ${state.derivedKeys.bitcoin.length} Bitcoin, ${state.derivedKeys.tron.length} TRON`);
       for (const err of state.derivedKeys.errors) logLine(`WARN: ${err}`);
     } else {
       if (!state.wallet) { logLine('ERROR: connect your wallet first'); return; }
       const addr = await state.wallet.getAddress();
-      state.derivedKeys = { evm: [{ address: addr, wallet: null, index: 0 }], solana: [], bitcoin: [], errors: [] };
+
+      let tronEntry = null;
+      if (inputs.families.tron) {
+        const tw = getTronLinkWeb();
+        if (tw && tw.defaultAddress && tw.defaultAddress.base58) {
+          tronEntry = { index: 0, address: tw.defaultAddress.base58, tronWeb: tw };
+        } else {
+          logLine('WARN: TRON is checked but TronLink is not connected. Open the TronLink extension and authorize this site, then Preview again. TRON will be skipped for now.');
+        }
+      }
+
+      state.derivedKeys = {
+        evm: [{ address: addr, wallet: null, index: 0 }],
+        solana: [],
+        bitcoin: [],
+        tron: tronEntry ? [tronEntry] : [],
+        errors: [],
+      };
       logLine(`Using connected address: ${addr}`);
+      if (tronEntry) logLine(`Using TronLink address: ${tronEntry.address}`);
     }
 
-    state.previews = { evm: [], solana: [], bitcoin: [] };
+    state.previews = { evm: [], solana: [], bitcoin: [], tron: [] };
 
     if (inputs.families.evm) {
       for (const { address, index } of state.derivedKeys.evm) {
@@ -812,7 +762,6 @@ async function runPreview() {
           logLine(`  WARN: derivation selection failed (${scrubSecret(e.message)}); using Phantom default`);
           selected = candidates.find((c) => c.name === 'phantom') || candidates[0];
         }
-
         logLine(`\nPreviewing Solana ${selected.address}...`);
         try {
           const p = await previewSolanaWallet(conn, selected.address);
@@ -834,13 +783,26 @@ async function runPreview() {
       }
     }
 
-    // ---- USD annotations for the auto-live threshold ----
+    if (inputs.families.tron && state.derivedKeys.tron.length > 0) {
+      for (const { address, index } of state.derivedKeys.tron) {
+        logLine(`\nPreviewing TRON ${address}...`);
+        try {
+          const p = await previewTronWallet(address);
+          state.previews.tron.push({ index, ...p });
+          logLine(`  TRX: ${p.trx?.formatted ?? '0'}`);
+          for (const t of p.tokens) logLine(`  ${t.symbol}: ${t.formatted}`);
+          if (p.error) logLine(`  warning: ${scrubSecret(p.error)}`);
+        } catch (e) { logLine(`  ERROR: ${scrubSecret(e.message)}`); }
+      }
+    }
+
     logLine('\nEstimating sweepable value...');
     await annotatePreviewValues(inputs);
     const totalUsd = [
       ...(state.previews.evm || []),
       ...(state.previews.solana || []),
       ...(state.previews.bitcoin || []),
+      ...(state.previews.tron || []),
     ].reduce((sum, p) => sum + (p._usdValue || 0), 0);
     logLine(`  total sweepable: ~$${totalUsd.toFixed(2)}`);
 
@@ -849,11 +811,11 @@ async function runPreview() {
 
     const tokensFound =
       state.previews.evm.reduce((n, p) => n + p.tokens.length, 0) +
-      state.previews.solana.reduce((n, p) => n + p.tokens.length, 0);
+      state.previews.solana.reduce((n, p) => n + p.tokens.length, 0) +
+      state.previews.tron.reduce((n, p) => n + p.tokens.length, 0);
 
     track.previewCompleted({ walletType: inputs.walletType, durationMs: Date.now() - startTime, tokensFound });
 
-    // ---- Auto-live offer ----
     await maybeAutoLive();
   } catch (e) {
     reportError(e, { phase: 'preview_fatal' });
@@ -905,6 +867,7 @@ async function runSweep(live, opts = {}) {
     logLine('\n⚠ Reminder: EVM wallets with no gas will be sponsored automatically for a fee.');
     logLine('  Solana source wallets need a small SOL balance to cover transaction fees.');
     logLine('  Bitcoin fees are deducted from the swept UTXOs.');
+    logLine('  TRON wallets need ~35 TRX for energy/bandwidth.');
 
     if (autoLive) {
       logLine('  (auto-live — no credit required)');
@@ -950,20 +913,19 @@ async function runSweep(live, opts = {}) {
   logLine(`  Sweep ID: ${sweepId}`);
   track.sweepStarted(live);
 
-  state.results = { evm: [], solana: [], bitcoin: [] };
+  state.results = { evm: [], solana: [], bitcoin: [], tron: [] };
   let successes = 0;
   let failures = 0;
 
-  const feeReceipts = { evm: [], solana: [], bitcoin: [] };
+  const feeReceipts = { evm: [], solana: [], bitcoin: [], tron: [] };
   const sponsoredGasByChain = {};
   const chainHadAnySuccess = {};
 
   const evmTotalForChain = (chain) =>
-    feeReceipts.evm
-      .filter((e) => e.chain === chain)
-      .reduce((sum, e) => sum + e.amountRaw, 0n);
+    feeReceipts.evm.filter((e) => e.chain === chain).reduce((sum, e) => sum + e.amountRaw, 0n);
   const solanaTotal = () => feeReceipts.solana.reduce((sum, e) => sum + e.amountRaw, 0n);
   const bitcoinTotal = () => feeReceipts.bitcoin.reduce((sum, e) => sum + e.amountRaw, 0n);
+  const tronTotal = () => feeReceipts.tron.reduce((sum, e) => sum + e.amountRaw, 0n);
 
   try {
     if (families.evm) {
@@ -971,10 +933,8 @@ async function runSweep(live, opts = {}) {
 
       for (const entry of state.derivedKeys.evm) {
         const address = entry.address;
-
         for (const chain of inputs.evmChains) {
           if (!isEligible('evm', chain, entry.index)) continue;
-
           if (chainSkipReasons[chain]) {
             logLine(`\n[EVM ${chain}] ${address}`);
             logLine(`  SKIPPED: ${chainSkipReasons[chain]}`);
@@ -984,15 +944,13 @@ async function runSweep(live, opts = {}) {
           logLine(`\n[EVM ${chain}] ${address}`);
           try {
             const provider = getProvider(chain);
-
             let signer;
             if (state.walletType === 'mnemonic') {
               signer = entry.wallet.connect(provider);
             } else if (state.walletType === 'extension') {
               const cfg = EVM_CHAINS[chain];
-              try {
-                await state.wallet.switchChain(cfg.chainId, chainExtraParams(chain));
-              } catch (e) {
+              try { await state.wallet.switchChain(cfg.chainId, chainExtraParams(chain)); }
+              catch (e) {
                 logLine(`  SKIPPED: could not switch wallet to ${chain} — ${scrubSecret(e.message)}`);
                 chainSkipReasons[chain] = `wallet cannot switch to ${chain}`;
                 continue;
@@ -1001,9 +959,8 @@ async function runSweep(live, opts = {}) {
               signer = await state.wallet.getEthersSigner(provider);
             } else if (state.walletType === 'walletconnect') {
               const cfg = EVM_CHAINS[chain];
-              try {
-                await state.wallet.switchChain(cfg.chainId, chainExtraParams(chain));
-              } catch (e) {
+              try { await state.wallet.switchChain(cfg.chainId, chainExtraParams(chain)); }
+              catch (e) {
                 logLine(`  SKIPPED: could not switch WalletConnect to ${chain} — ${scrubSecret(e.message)}`);
                 chainSkipReasons[chain] = `walletconnect cannot switch to ${chain}`;
                 continue;
@@ -1014,9 +971,8 @@ async function runSweep(live, opts = {}) {
               signer = await state.wallet.getEthersSigner(provider);
             }
 
-            try {
-              await verifySignerChain(chain, provider, signer, EVM_CHAINS[chain], address);
-            } catch (e) {
+            try { await verifySignerChain(chain, provider, signer, EVM_CHAINS[chain], address); }
+            catch (e) {
               if (e instanceof ChainVerifyError) {
                 logLine(`  SKIPPED: ${scrubSecret(e.message)}`);
                 chainSkipReasons[chain] = `chain verification failed on ${chain}`;
@@ -1032,12 +988,7 @@ async function runSweep(live, opts = {}) {
               const chainValueUsdc = (typeof preview?._usdValue === 'number')
                 ? preview._usdValue
                 : await estimateChainValueUsdc(chain, preview);
-
-              if (chainValueUsdc <= 0) {
-                chainSkipReasons[chain] = `nothing to sweep on ${chain}`;
-                continue;
-              }
-
+              if (chainValueUsdc <= 0) { chainSkipReasons[chain] = `nothing to sweep on ${chain}`; continue; }
               if (chainValueUsdc < MIN_SPONSOR_FLOOR_USDC) {
                 logLine(`  SKIPPED: ${chain} value (~$${chainValueUsdc.toFixed(2)}) below $${MIN_SPONSOR_FLOOR_USDC} sponsorship floor`);
                 chainSkipReasons[chain] = `below sponsorship floor on ${chain}`;
@@ -1077,9 +1028,7 @@ async function runSweep(live, opts = {}) {
             const received = BigInt(sweepResult.usdcReceivedRaw || '0');
             if (received > 0n) {
               feeReceipts.evm.push({
-                chain,
-                sourceAddress: address,
-                amountRaw: received,
+                chain, sourceAddress: address, amountRaw: received,
                 userShareRaw: BigInt(sweepResult.userReceivedRaw || '0').toString(),
                 operatorFeeRaw: BigInt(sweepResult.feeReceivedRaw || '0').toString(),
                 decimals: chain === 'bnb' ? 18 : 6,
@@ -1113,9 +1062,8 @@ async function runSweep(live, opts = {}) {
         if (!isEligible('solana', null, index)) continue;
 
         let selected;
-        try {
-          selected = await selectSolanaKeypair(conn, candidates, logLine);
-        } catch (e) {
+        try { selected = await selectSolanaKeypair(conn, candidates, logLine); }
+        catch (e) {
           logLine(`  WARN: derivation selection failed (${scrubSecret(e.message)}); using Phantom default`);
           selected = candidates.find((c) => c.name === 'phantom') || candidates[0];
         }
@@ -1129,22 +1077,18 @@ async function runSweep(live, opts = {}) {
             logLine(`  SKIPPED: needs ~0.03 SOL for deBridge order fees (has ${(Number(solLamports) / 1e9).toFixed(4)} SOL)`);
             continue;
           }
-
           const r = await sweepSolana(conn, keypair, { dryRun });
           state.results.solana.push({ index, ...r });
-
           const received = BigInt(r.usdcReceivedRaw || '0');
           if (received > 0n) {
             feeReceipts.solana.push({
-              sourceAddress: address,
-              amountRaw: received,
+              sourceAddress: address, amountRaw: received,
               userShareRaw: BigInt(r.userReceivedRaw || '0').toString(),
               operatorFeeRaw: BigInt(r.feeReceivedRaw || '0').toString(),
               orderIds: (r.swaps || []).filter((s) => s.orderId).map((s) => s.orderId),
               estimated: true,
             });
           }
-
           for (const s of r.swaps) {
             const mintLabel = s.mint === 'SOL' ? 'SOL' : s.mint.slice(0, 8);
             const receivedNote = s.received ? ` (expected ${ethers.formatUnits(BigInt(s.received), 6)} USDC on Ethereum)` : '';
@@ -1154,11 +1098,6 @@ async function runSweep(live, opts = {}) {
             if (s.status === 'SUCCESS') successes++;
             if (s.status === 'FAILED' || s.status === 'ERROR') failures++;
           }
-          for (const t of r.transfers) {
-            logLine(`  transfer ${t.mint.slice(0, 8)}: ${t.status}`);
-            if (t.status === 'SUCCESS') successes++;
-            if (t.status === 'FAILED' || t.status === 'ERROR') failures++;
-          }
           for (const e of r.errors) logLine(`  ERROR: ${scrubSecret(e)}`);
         } catch (e) { logLine(`  FATAL: ${scrubSecret(e.message)}`); }
       }
@@ -1167,27 +1106,22 @@ async function runSweep(live, opts = {}) {
     if (families.bitcoin && state.derivedKeys.bitcoin.length > 0) {
       for (const { keyPair, address, index } of state.derivedKeys.bitcoin) {
         if (!isEligible('bitcoin', null, index)) continue;
-
         logLine(`\n[Bitcoin] ${address}`);
         try {
           const r = await sweepBitcoin(address, keyPair, { dryRun, logLine });
           state.results.bitcoin.push({ index, ...r });
-
           const received = BigInt(r.usdcReceivedRaw || '0');
           if (received > 0n) {
             feeReceipts.bitcoin.push({
-              sourceAddress: address,
-              amountRaw: received,
+              sourceAddress: address, amountRaw: received,
               userShareRaw: BigInt(r.userReceivedRaw || '0').toString(),
               operatorFeeRaw: BigInt(r.feeReceivedRaw || '0').toString(),
               txids: r.txid ? [r.txid] : [],
               estimated: true,
             });
           }
-
           const receivedNote = r.expectedUsdcOut && r.expectedUsdcOut !== '0'
-            ? ` (expected ${ethers.formatUnits(BigInt(r.expectedUsdcOut), 6)} USDC on Ethereum)`
-            : '';
+            ? ` (expected ${ethers.formatUnits(BigInt(r.expectedUsdcOut), 6)} USDC on Ethereum)` : '';
           logLine(`  bridge btc→eth: ${r.status} ${r.txid || ''}${receivedNote}${r.error ? ' — ' + r.error : ''}`);
           if (r.status === 'SUCCESS') successes++;
           if (r.status === 'ERROR' || r.status === 'BROADCAST_ERROR') failures++;
@@ -1195,11 +1129,48 @@ async function runSweep(live, opts = {}) {
       }
     }
 
+    if (families.tron && state.derivedKeys.tron.length > 0) {
+      for (const { address, index, tronWeb } of state.derivedKeys.tron) {
+        if (!isEligible('tron', null, index)) continue;
+        logLine(`\n[TRON] ${address}`);
+        try {
+          const r = await sweepTron(address, {
+            dryRun,
+            destination: destinations.evm,
+            tronWeb,
+          });
+          state.results.tron.push({ index, ...r });
+
+          const received = BigInt(r.usdcReceivedRaw || '0');
+          if (received > 0n) {
+            feeReceipts.tron.push({
+              sourceAddress: address,
+              amountRaw: received,
+              userShareRaw: BigInt(r.userReceivedRaw || '0').toString(),
+              operatorFeeRaw: BigInt(r.feeReceivedRaw || '0').toString(),
+              txids: (r.swaps || []).filter((s) => s.txid).map((s) => s.txid),
+              orderIds: (r.swaps || []).filter((s) => s.orderId).map((s) => s.orderId),
+              estimated: true,
+            });
+          }
+
+          for (const s of r.swaps) {
+            const note = s.note ? ` (${s.note})` : '';
+            const orderNote = s.orderId ? ` order=${s.orderId.slice(0, 10)}...` : '';
+            const txid = s.txid ? ` ${s.txid}` : '';
+            const expected = s.amountOutExpected ? ` (expected ${s.amountOutExpected} USDC)` : '';
+            logLine(`  bridge ${s.symbol}: ${s.status}${txid}${orderNote}${expected}${note}${s.error ? ' — ' + s.error : ''}`);
+            if (s.status === 'SUCCESS') successes++;
+            if (s.status === 'FAILED' || s.status === 'ERROR') failures++;
+          }
+          for (const e of r.errors) logLine(`  ERROR: ${scrubSecret(e)}`);
+        } catch (e) { logLine(`  FATAL: ${scrubSecret(e.message)}`); }
+      }
+    }
+
     logLine(`\n=== ${dryRun ? 'DRY RUN' : 'LIVE SWEEP'} COMPLETE ===`);
 
-    // ---- Gas sponsorships ----
     const gasSponsorships = [];
-
     if (live) {
       const nativePriceCache = {};
       async function getNativePriceUsd(chain) {
@@ -1221,15 +1192,12 @@ async function runSweep(live, opts = {}) {
 
       for (const [chain, wallets] of Object.entries(sponsoredGasByChain)) {
         if (!chainHadAnySuccess[chain]) continue;
-
         let totalWei = 0n;
         for (const amt of Object.values(wallets)) totalWei += BigInt(amt);
-
         const nativePriceUsd = await getNativePriceUsd(chain);
         const amountNative = Number(totalWei) / 1e18;
         const costUsdCents = Math.round(amountNative * nativePriceUsd * 100);
         const feeUsdCents = computeSponsorshipFeeUsdCents(costUsdCents);
-
         gasSponsorships.push({
           chain,
           totalSponsoredWei: totalWei.toString(),
@@ -1242,7 +1210,6 @@ async function runSweep(live, opts = {}) {
       }
     }
 
-    // ---- Summary ----
     logLine('');
     logLine('═══════════════════════════════════════════════════════════');
     logLine('SWEEP SUMMARY RESULTS');
@@ -1254,6 +1221,7 @@ async function runSweep(live, opts = {}) {
     }
     if (solanaTotal() > 0n) chainsSwept.push('solana→eth');
     if (bitcoinTotal() > 0n) chainsSwept.push('bitcoin→eth');
+    if (tronTotal() > 0n) chainsSwept.push('tron→eth');
 
     logLine(`  Chains swept:      ${chainsSwept.length ? chainsSwept.join(', ') : '(none)'}`);
     logLine(`  Tokens processed:  ${successes + failures}`);
@@ -1269,7 +1237,6 @@ async function runSweep(live, opts = {}) {
       logLine('');
 
       let totalReceived = 0;
-
       for (const chain of inputs.evmChains) {
         const received = evmTotalForChain(chain);
         if (received === 0n) continue;
@@ -1277,22 +1244,24 @@ async function runSweep(live, opts = {}) {
         logLine(`    ${chain.padEnd(10)} ${ethers.formatUnits(received, decimals)} USDC`);
         totalReceived += Number(ethers.formatUnits(received, decimals));
       }
-
       const sTotal = solanaTotal();
       if (sTotal > 0n) {
         logLine(`    ${'solana→eth'.padEnd(10)} ${ethers.formatUnits(sTotal, 6)} USDC (via deBridge, est.)`);
         totalReceived += Number(ethers.formatUnits(sTotal, 6));
       }
-
       const bTotal = bitcoinTotal();
       if (bTotal > 0n) {
         logLine(`    ${'bitcoin→eth'.padEnd(10)} ${ethers.formatUnits(bTotal, 6)} USDC (via THORChain, est.)`);
         totalReceived += Number(ethers.formatUnits(bTotal, 6));
       }
+      const tTotal = tronTotal();
+      if (tTotal > 0n) {
+        logLine(`    ${'tron→eth'.padEnd(10)} ${ethers.formatUnits(tTotal, 6)} USDC (via deBridge, est.)`);
+        totalReceived += Number(ethers.formatUnits(tTotal, 6));
+      }
 
       const totalSponsorFeesUsdc = gasSponsorships.reduce(
-        (sum, gs) => sum + Number(gs.sponsorshipFeeUsdcRaw) / 1e6,
-        0
+        (sum, gs) => sum + Number(gs.sponsorshipFeeUsdcRaw) / 1e6, 0
       );
       const userShareUsdc = totalReceived * 0.9;
       const netUserUsdc = Math.max(0, userShareUsdc - totalSponsorFeesUsdc);
@@ -1311,19 +1280,18 @@ async function runSweep(live, opts = {}) {
 
     logLine('═══════════════════════════════════════════════════════════');
 
-    // ---- Record fee on worker (with retry) ----
     const hasEvmReceipts = feeReceipts.evm.length > 0;
     const hasSolanaReceipts = feeReceipts.solana.length > 0;
     const hasBitcoinReceipts = feeReceipts.bitcoin.length > 0;
+    const hasTronReceipts = feeReceipts.tron.length > 0;
 
-    if (live && (hasEvmReceipts || hasSolanaReceipts || hasBitcoinReceipts)) {
+    if (live && (hasEvmReceipts || hasSolanaReceipts || hasBitcoinReceipts || hasTronReceipts)) {
       try {
         const receipts = [];
 
         for (const entry of feeReceipts.evm) {
           receipts.push({
-            family: 'evm',
-            chain: entry.chain,
+            family: 'evm', chain: entry.chain,
             sourceAddress: entry.sourceAddress,
             amountRaw: entry.amountRaw.toString(),
             decimals: entry.decimals,
@@ -1373,6 +1341,26 @@ async function runSweep(live, opts = {}) {
           });
         }
 
+        for (const entry of feeReceipts.tron) {
+          receipts.push({
+            family: 'tron',
+            sourceAddress: entry.sourceAddress,
+            amountRaw: entry.amountRaw.toString(),
+            decimals: 6,
+            symbol: 'USDC',
+            recipient: FEE_WALLET_EVM,
+            sourceChain: 'tron',
+            destinationChain: 'ethereum',
+            bridge: 'debridge',
+            txids: entry.txids,
+            orderIds: entry.orderIds,
+            userDestination: destinations.evm,
+            userShareRaw: entry.userShareRaw,
+            operatorFeeRaw: entry.operatorFeeRaw,
+            estimated: true,
+          });
+        }
+
         if (receipts.length > 0) {
           const feeResult = await recordFeeWithRetry({
             sweepId,
@@ -1407,7 +1395,6 @@ async function runSweep(live, opts = {}) {
 document.addEventListener('DOMContentLoaded', async () => {
   initSentry().catch(() => {});
   initPlausible();
-
   getClientId();
 
   fetchClaimInfo()
@@ -1440,7 +1427,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   syncMnemonicNotice();
   syncWalletTypeDefaults();
 
-  ['#family-evm', '#family-solana', '#family-bitcoin'].forEach((sel) => {
+  ['#family-evm', '#family-solana', '#family-bitcoin', '#family-tron'].forEach((sel) => {
     const el = $(sel);
     if (el) el.addEventListener('change', syncDestinationFields);
   });

@@ -46,6 +46,12 @@
  *   claim, then 24h to use. Free credits live in their own record
  *   (`free_credits:{clientId}`) with an `expiresAt` field and a KV TTL
  *   one minute longer. They are consumed before paid credits.
+ *
+ * Receipt families:
+ *   evm, solana, bitcoin, tron. The tron family carries TRC-20 USDT
+ *   sweeps bridged to USDC on Ethereum via deBridge. Its receipts use
+ *   the same shape as solana (txids + orderIds), just with a different
+ *   sourceChain string.
  */
 
 import { ethers } from 'ethers';
@@ -623,8 +629,6 @@ export async function handleClaimInfo(request, env, cors) {
 
   const freeAmount = free ? free.amount : 0;
   const useExpiresAt = free?.expiresAt || null;
-  // Guard against a malformed expiresAt producing NaN, which would
-  // serialize to null over JSON and render as "NaNh" on the client.
   let useMsRemaining = 0;
   if (useExpiresAt) {
     const ms = new Date(useExpiresAt).getTime();
@@ -752,11 +756,6 @@ export async function handleClaimFree(request, env, cors) {
   }
 
   const grantedAtMs = now;
-
-  // Read the effective balance once, before the grant. This is used
-  // for both the history entry and the response, so there's exactly
-  // one round-trip and the two values can't disagree if a concurrent
-  // request touches the paid balance mid-flight.
   const preGrant = await getEffectiveBalance(env, clientId);
 
   try {
@@ -1003,8 +1002,8 @@ export async function handleFeeRecord(request, env, cors) {
     if (!r || typeof r !== 'object') {
       return json({ error: `receipt[${i}] is not an object` }, 400, cors);
     }
-    if (typeof r.family !== 'string' || !['evm', 'solana', 'bitcoin'].includes(r.family)) {
-      return json({ error: `receipt[${i}].family must be evm, solana, or bitcoin` }, 400, cors);
+    if (typeof r.family !== 'string' || !['evm', 'solana', 'bitcoin', 'tron'].includes(r.family)) {
+      return json({ error: `receipt[${i}].family must be evm, solana, bitcoin, or tron` }, 400, cors);
     }
     if (typeof r.amountRaw !== 'string' || !/^\d+$/.test(r.amountRaw)) {
       return json({ error: `receipt[${i}].amountRaw must be a decimal string` }, 400, cors);
