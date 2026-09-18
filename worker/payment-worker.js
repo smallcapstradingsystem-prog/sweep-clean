@@ -7,7 +7,7 @@
  *   POST /credits/balance       — get credit balance for a client ID
  *   POST /credits/consume       — consume one credit
  *   POST /credits/claim-info    — read free-credit claim window state
- *   POST /credits/claim-free    — grant 3 free credits if within window
+ *   POST /credits/claim-free    — grant 2 free credits if within window
  *   POST /gas/sponsor           — fund a user wallet with native gas
  *   POST /sweep/commit          — commit a sweep's destination (server-authoritative)
  *   POST /fee/record            — record sweep receipts
@@ -36,10 +36,16 @@
  *                              operator dashboard.
  *
  * KV namespaces:
- *   CREDITS             — balances, history, free-claim state, rate limits,
- *                         fee records, sweep commits, idempotency keys,
- *                         admin rate limits, client metadata
+ *   CREDITS             — paid balances, free-credit pool, history, free-claim
+ *                         state, rate limits, fee records, sweep commits,
+ *                         idempotency keys, admin rate limits, client metadata
  *   PENDING_PAYMENTS    — crypto payment records
+ *
+ * Free-credit model:
+ *   The launch bonus grants 2 free credits with two 24h clocks: 24h to
+ *   claim, then 24h to use. Free credits live in their own record
+ *   (`free_credits:{clientId}`) with an `expiresAt` field and a KV TTL
+ *   one minute longer. They are consumed before paid credits.
  */
 
 import { ethers } from 'ethers';
@@ -114,12 +120,6 @@ const SPONSOR_RPC = {
   bnb:      'https://bsc-rpc.publicnode.com',
 };
 
-// Native-gas-per-tx targets. The worker sends exactly enough to bring
-// the user's wallet up to this value; it never sends more.
-//
-// NOTE: These values must match GAS_PER_TX_COST in config.js. If they
-// drift, the client's gas check and the worker's sponsor send will
-// disagree and sweeps will fail intermittently.
 const SPONSOR_TARGET_WEI = {
   ethereum: '0.0008',
   arbitrum: '0.00002',
@@ -129,9 +129,6 @@ const SPONSOR_TARGET_WEI = {
   bnb:      '0.0002',
 };
 
-// Hard cap on a single sponsor send, regardless of computed shortfall.
-// Belt-and-braces: even if the target value is somehow wrong for a
-// chain, the worker won't exceed this.
 const SPONSOR_MAX_WEI = {
   ethereum: '0.005', arbitrum: '0.0005', optimism: '0.0005',
   base: '0.0005', polygon: '0.2', bnb: '0.005',
@@ -139,94 +136,30 @@ const SPONSOR_MAX_WEI = {
 
 const SPONSOR_RATE_MAX = 20;
 const SPONSOR_RATE_WINDOW_MS = 10 * 60 * 1000;
-
-// Idempotency window for /gas/sponsor. Same (chain, toAddress) within
-// this window returns the prior send result without sending again.
-// 5 minutes is longer than any of these chains' confirmation time, so
-// a replayed request always sees the "already sent" branch, not a
-// duplicate send.
 const SPONSOR_IDEM_TTL = 60 * 5;
-
-// Idempotency window for /credits/consume. Same sweepId within this
-// window returns the already-consumed result without decrementing
-// again. 30 days matches the sweep-commit TTL.
 const CONSUME_IDEM_TTL = 60 * 60 * 24 * 30;
-
-// Lock TTL for /crypto/verify. Long enough to cover an Etherscan
-// lookup, short enough that a crashed request doesn't wedge the
-// payment for long.
 const CRYPTO_VERIFY_LOCK_TTL = 30;
 
-const FREE_CLAIM_CREDITS = 3;
+const FREE_CLAIM_CREDITS = 2;
 const FREE_CLAIM_WINDOW_MS = 24 * 60 * 60 * 1000;
+const FREE_CLAIM_USE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const FREE_CLAIM_START_TTL = 48 * 60 * 60;
 const FREE_CLAIM_GRANTED_TTL = 60 * 60 * 24 * 365;
 const FREE_CLAIM_IP_MAX = 2;
 const FREE_CLAIM_IP_TTL = 60 * 60 * 24 * 7;
 
-// Fingerprint cap: independent of IP. A single browser profile can't
-// claim more than this many times in the window, even if it rotates
-// clientIds or the attacker rotates IPs. Complements the IP cap.
-//
-// A missing fingerprint (empty string) is treated as its own bucket —
-// a client that declines to send one can still claim, but all such
-// claims share the same counter, so the cap still applies.
 const FREE_CLAIM_FINGERPRINT_MAX = 2;
 const FREE_CLAIM_FINGERPRINT_TTL = 60 * 60 * 24 * 7;
 
-// Sweep commits are keyed by sweepId and hold the authoritative
-// destination for a sweep. Written by /sweep/commit, read by
-// /fee/record.
-//
-// Kept at least as long as the fee record's expected lifetime. The
-// fee record itself has no TTL (it lives until /fee/mark-forwarded),
-// so 30 days gives the operator plenty of runway to reconcile before
-// the commit vanishes — important if on-chain receipt verification is
-// ever added, since that would need the commit to still be alive.
-const SWEEP_COMMIT_TTL = 60 * 60 * 24 * 30;
+const FREE_CREDITS_TTL = Math.ceil(FREE_CLAIM_USE_WINDOW_MS / 1000) + 60;
 
-// =====================================================================
-// ADMIN RATE LIMITING
-// =====================================================================
-//
-// /admin/* endpoints are gated by X-Operator-Secret only (no
-// Cloudflare Access). A brute-force attempt would otherwise be
-// unthrottled. Two caps apply per IP:
-//
-//   - AUTH_FAIL_MAX failed auth attempts per AUTH_FAIL_WINDOW_MS
-//     (attempts with a wrong/missing secret)
-//   - ADMIN_CALL_MAX total admin requests per ADMIN_RATE_WINDOW_MS
-//     (successful or not)
-//
-// Exceeding either returns 429. Successful admin calls still count
-// toward the total cap so a legitimate operator can't be starved by
-// an attacker from the same NAT.
-// =====================================================================
+const SWEEP_COMMIT_TTL = 60 * 60 * 24 * 30;
 
 const ADMIN_AUTH_FAIL_MAX = 10;
 const ADMIN_AUTH_FAIL_WINDOW_MS = 15 * 60 * 1000;
 
 const ADMIN_CALL_MAX = 120;
 const ADMIN_RATE_WINDOW_MS = 10 * 60 * 1000;
-
-// =====================================================================
-// SPONSOR WALLET — accepts hex private key OR BIP-39 mnemonic
-// =====================================================================
-//
-// `ethers.Wallet` only accepts a hex private key. `HDNodeWallet` only
-// accepts a mnemonic. We detect the shape and pick the right
-// constructor. This is the fix for the `invalid BytesLike value` error
-// that was echoing the mnemonic — we no longer hand a phrase to
-// `new ethers.Wallet(...)`.
-//
-// Default derivation path matches MetaMask/Trust for account 0:
-//   m/44'/60'/0'/0/0
-//
-// Detection:
-//   - /^0x[a-fA-F0-9]{64}$/       → hex private key
-//   - 12/15/18/21/24 space-separated words → mnemonic
-//   - anything else                → throw a static, non-echoing error
-// =====================================================================
 
 const HEX_KEY_RE = /^0x[a-fA-F0-9]{64}$/;
 const MNEMONIC_RE = /^(\S+\s+){11,23}\S+$/;
@@ -387,19 +320,6 @@ export async function getCryptoRate(methodConfig) {
 // =====================================================================
 // CRYPTO — VERIFY
 // =====================================================================
-//
-// Concurrency: two pollers hitting the endpoint at the same moment
-// could both pass the `pending.verified` check, both scan, both find
-// the tx, and both credit the account. A short-lived lock keyed by
-// payment_id prevents that.
-//
-// KV is eventually consistent and has no compare-and-swap, so this
-// lock is best-effort — but it narrows the race window from
-// "wherever the two requests happen to interleave" to "the
-// millisecond between get and put", which in practice is enough.
-// The double-check after acquiring the lock handles the case where a
-// concurrent request finished while we were scanning.
-// =====================================================================
 
 export async function handleCryptoVerify(request, env, cors) {
   const { payment_id } = await request.json();
@@ -412,8 +332,6 @@ export async function handleCryptoVerify(request, env, cors) {
   if (pending.verified) return json({ ok: true, alreadyVerified: true, credits: pending.credits }, 200, cors);
   if (new Date(pending.expiresAt) < new Date()) return json({ error: 'payment expired' }, 410, cors);
 
-  // Best-effort lock. If another request holds it, tell the caller to
-  // keep polling — they will, since /crypto/verify is called in a loop.
   const lockKey = `crypto:lock:${payment_id}`;
   const lock = await env.CREDITS.get(lockKey);
   if (lock) {
@@ -425,9 +343,6 @@ export async function handleCryptoVerify(request, env, cors) {
     const found = await scanForPayment(env, pending);
     if (!found) return json({ status: 'pending', message: 'No matching transaction found yet' }, 200, cors);
 
-    // Re-read the pending record. Another request may have verified
-    // while we were scanning (and then released its own lock). If so,
-    // don't credit twice.
     const refreshedRaw = await env.PENDING_PAYMENTS.get(`crypto:${payment_id}`);
     if (refreshedRaw) {
       const refreshed = JSON.parse(refreshedRaw);
@@ -528,30 +443,79 @@ export async function scanBitcoin(env, address, expectedRaw) {
 }
 
 // =====================================================================
-// CREDITS
+// FREE-CREDIT POOL
 // =====================================================================
-//
-// /credits/consume is idempotent on sweepId. If the client retries
-// after a network blip, the second call finds the prior result in KV
-// and returns it without decrementing again. sweepId is optional for
-// backwards compatibility — callers that don't send it fall through
-// to the old behavior (each call decrements).
+
+export async function readFreeCredits(env, clientId) {
+  const raw = await env.CREDITS.get(`free_credits:${clientId}`);
+  if (!raw) return null;
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { return null; }
+  if (!parsed || typeof parsed.amount !== 'number' || parsed.amount <= 0) return null;
+  if (!parsed.expiresAt) return null;
+  const expiresMs = new Date(parsed.expiresAt).getTime();
+  if (!Number.isFinite(expiresMs)) return null;
+  if (Date.now() >= expiresMs) return null;
+  return parsed;
+}
+
+export async function writeFreeCredits(env, clientId, amount, grantedAtMs) {
+  if (amount <= 0) {
+    await env.CREDITS.delete(`free_credits:${clientId}`).catch(() => {});
+    return;
+  }
+  const grantedAt = new Date(grantedAtMs).toISOString();
+  const expiresAt = new Date(grantedAtMs + FREE_CLAIM_USE_WINDOW_MS).toISOString();
+  await env.CREDITS.put(`free_credits:${clientId}`, JSON.stringify({
+    amount, grantedAt, expiresAt,
+  }), { expirationTtl: FREE_CREDITS_TTL });
+}
+
+async function writeFreeCreditsWithExpiry(env, clientId, amount, grantedAt, expiresAt) {
+  if (amount <= 0) {
+    await env.CREDITS.delete(`free_credits:${clientId}`).catch(() => {});
+    return;
+  }
+  const expiresMs = new Date(expiresAt).getTime();
+  const remainingSec = Math.max(60, Math.ceil((expiresMs - Date.now()) / 1000) + 60);
+  await env.CREDITS.put(`free_credits:${clientId}`, JSON.stringify({
+    amount, grantedAt, expiresAt,
+  }), { expirationTtl: remainingSec });
+}
+
+export async function getEffectiveBalance(env, clientId) {
+  const [paidRaw, free] = await Promise.all([
+    env.CREDITS.get(`balance:${clientId}`),
+    readFreeCredits(env, clientId),
+  ]);
+  const paid = paidRaw ? parseInt(paidRaw, 10) : 0;
+  const freeAmount = free ? free.amount : 0;
+  return { paid, free: freeAmount, effective: paid + freeAmount, freeExpiresAt: free?.expiresAt || null };
+}
+
+// =====================================================================
+// CREDITS
 // =====================================================================
 
 export async function handleCreditsBalance(request, env, cors) {
   const { clientId } = await request.json();
   if (!clientId) return json({ error: 'clientId required' }, 400, cors);
-  const balance = await getBalance(env, clientId);
-  return json({ clientId, balance }, 200, cors);
+
+  const { paid, free, effective, freeExpiresAt } = await getEffectiveBalance(env, clientId);
+
+  return json({
+    clientId,
+    balance: effective,
+    paid,
+    free,
+    freeExpiresAt,
+  }, 200, cors);
 }
 
 export async function handleCreditsConsume(request, env, cors) {
   const { clientId, reason, sweepId } = await request.json();
   if (!clientId) return json({ error: 'clientId required' }, 400, cors);
 
-  // Idempotency: if a sweepId was supplied and we've already consumed
-  // for it, return the prior result. This is what makes the endpoint
-  // safe to retry.
   if (sweepId && typeof sweepId === 'string' && sweepId.length >= 8) {
     const idemKey = `consume:${sweepId}`;
     const prior = await env.CREDITS.get(idemKey);
@@ -560,7 +524,8 @@ export async function handleCreditsConsume(request, env, cors) {
         const parsed = JSON.parse(prior);
         if (parsed.clientId === clientId) {
           return json({
-            ok: true, consumed: 1, newBalance: parsed.newBalance, alreadyConsumed: true,
+            ok: true, consumed: 1, newBalance: parsed.newBalance,
+            pool: parsed.pool, alreadyConsumed: true,
           }, 200, cors);
         }
       } catch {
@@ -569,18 +534,49 @@ export async function handleCreditsConsume(request, env, cors) {
     }
   }
 
-  const balance = await getBalance(env, clientId);
-  if (balance < 1) return json({ error: 'insufficient credits', balance }, 402, cors);
+  const free = await readFreeCredits(env, clientId);
+  const paidRaw = await env.CREDITS.get(`balance:${clientId}`);
+  const paid = paidRaw ? parseInt(paidRaw, 10) : 0;
 
-  const newBalance = await addCredits(env, clientId, -1, { type: 'consume', reason: reason || 'sweep' });
+  const freeAmount = free ? free.amount : 0;
+  const effective = paid + freeAmount;
+  if (effective < 1) {
+    return json({ error: 'insufficient credits', balance: 0 }, 402, cors);
+  }
+
+  let pool;
+  let newEffective;
+
+  if (freeAmount > 0) {
+    pool = 'free';
+    const remaining = freeAmount - 1;
+    await writeFreeCreditsWithExpiry(env, clientId, remaining, free.grantedAt, free.expiresAt);
+    newEffective = paid + remaining;
+  } else {
+    pool = 'paid';
+    newEffective = paid - 1;
+    await env.CREDITS.put(`balance:${clientId}`, String(newEffective));
+  }
+
+  const historyRaw = await env.CREDITS.get(`history:${clientId}`);
+  const history = historyRaw ? JSON.parse(historyRaw) : [];
+  history.unshift({
+    delta: -1,
+    balance: newEffective,
+    at: new Date().toISOString(),
+    type: 'consume',
+    reason: reason || 'sweep',
+    pool,
+  });
+  await env.CREDITS.put(`history:${clientId}`, JSON.stringify(history.slice(0, 50)));
 
   if (sweepId && typeof sweepId === 'string' && sweepId.length >= 8) {
     await env.CREDITS.put(`consume:${sweepId}`, JSON.stringify({
-      clientId, newBalance, consumedAt: new Date().toISOString(),
+      clientId, newBalance: newEffective, pool, consumedAt: new Date().toISOString(),
     }), { expirationTtl: CONSUME_IDEM_TTL });
   }
 
-  return json({ ok: true, consumed: 1, newBalance }, 200, cors);
+  return json({ ok: true, consumed: 1, newBalance: newEffective, pool }, 200, cors);
 }
 
 export async function getBalance(env, clientId) {
@@ -602,23 +598,6 @@ export async function addCredits(env, clientId, delta, metadata = {}) {
 // =====================================================================
 // FREE CREDITS — CLAIM WINDOW
 // =====================================================================
-//
-// Option B: the 24h window starts on the first successful claim.
-// /credits/claim-info never writes to KV.
-//
-// IP policy: up to 2 claims per IP within a rolling 7-day window.
-//
-// Fingerprint policy: up to 2 claims per fingerprint within a rolling
-// 7-day window. The fingerprint is a soft hash of ambient browser
-// signals, sent only on /credits/claim-free. An empty/missing
-// fingerprint is treated as its own bucket, so a client that declines
-// to send one can still claim but shares a counter with all other
-// such clients.
-//
-// Both counters are incremented before the grant (a "reserve") so two
-// concurrent requests can't both read N and both grant. If the grant
-// throws, both reservations are released.
-// =====================================================================
 
 export async function handleClaimInfo(request, env, cors) {
   const { clientId } = await request.json();
@@ -631,15 +610,26 @@ export async function handleClaimInfo(request, env, cors) {
   const grantedKey = `free_claim:granted:${clientId}`;
   const ipKey = `free_claim:ip:${ip}`;
 
-  const [startRaw, grantedRaw, ipClaimsRaw] = await Promise.all([
+  const [startRaw, grantedRaw, ipClaimsRaw, free] = await Promise.all([
     env.CREDITS.get(startKey),
     env.CREDITS.get(grantedKey),
     env.CREDITS.get(ipKey),
+    readFreeCredits(env, clientId),
   ]);
 
   const now = Date.now();
   const ipClaims = ipClaimsRaw ? parseInt(ipClaimsRaw, 10) : 0;
   const blockedByIp = ipClaims >= FREE_CLAIM_IP_MAX;
+
+  const freeAmount = free ? free.amount : 0;
+  const useExpiresAt = free?.expiresAt || null;
+  // Guard against a malformed expiresAt producing NaN, which would
+  // serialize to null over JSON and render as "NaNh" on the client.
+  let useMsRemaining = 0;
+  if (useExpiresAt) {
+    const ms = new Date(useExpiresAt).getTime();
+    useMsRemaining = Number.isFinite(ms) ? Math.max(0, ms - now) : 0;
+  }
 
   if (grantedRaw) {
     const startMs = startRaw ? new Date(startRaw).getTime() : null;
@@ -649,6 +639,7 @@ export async function handleClaimInfo(request, env, cors) {
       windowEnd: startMs ? new Date(startMs + FREE_CLAIM_WINDOW_MS).toISOString() : null,
       msRemaining: 0, creditsGranted: FREE_CLAIM_CREDITS,
       ipClaims, ipMax: FREE_CLAIM_IP_MAX,
+      freeAmount, useExpiresAt, useMsRemaining,
     }, 200, cors);
   }
 
@@ -658,6 +649,7 @@ export async function handleClaimInfo(request, env, cors) {
       windowStart: null, windowEnd: null,
       msRemaining: FREE_CLAIM_WINDOW_MS, creditsGranted: 0,
       ipClaims, ipMax: FREE_CLAIM_IP_MAX,
+      freeAmount, useExpiresAt, useMsRemaining,
     }, 200, cors);
   }
 
@@ -671,6 +663,7 @@ export async function handleClaimInfo(request, env, cors) {
     windowEnd: new Date(windowEnd).toISOString(),
     msRemaining, creditsGranted: 0,
     ipClaims, ipMax: FREE_CLAIM_IP_MAX,
+    freeAmount, useExpiresAt, useMsRemaining,
   }, 200, cors);
 }
 
@@ -680,8 +673,6 @@ export async function handleClaimFree(request, env, cors) {
     return json({ error: 'clientId required' }, 400, cors);
   }
 
-  // Normalize: empty/missing fingerprint becomes the empty string,
-  // which is treated as its own bucket for rate-limiting purposes.
   const fp = (typeof fingerprint === 'string' && fingerprint.length > 0)
     ? fingerprint.slice(0, 64)
     : '';
@@ -696,9 +687,10 @@ export async function handleClaimFree(request, env, cors) {
 
   const grantedRaw = await env.CREDITS.get(grantedKey);
   if (grantedRaw) {
+    const { effective } = await getEffectiveBalance(env, clientId);
     return json({
       ok: true, alreadyClaimed: true, creditsGranted: 0,
-      newBalance: await getBalance(env, clientId),
+      newBalance: effective,
     }, 200, cors);
   }
 
@@ -706,10 +698,11 @@ export async function handleClaimFree(request, env, cors) {
   const ipClaimsRaw = await env.CREDITS.get(ipKey);
   const ipClaims = ipClaimsRaw ? parseInt(ipClaimsRaw, 10) : 0;
   if (ipClaims >= FREE_CLAIM_IP_MAX) {
+    const { effective } = await getEffectiveBalance(env, clientId);
     return json({
       ok: true, blockedByIp: true, creditsGranted: 0,
       ipClaims, ipMax: FREE_CLAIM_IP_MAX,
-      newBalance: await getBalance(env, clientId),
+      newBalance: effective,
     }, 200, cors);
   }
 
@@ -717,14 +710,14 @@ export async function handleClaimFree(request, env, cors) {
   const fpClaimsRaw = await env.CREDITS.get(fpKey);
   const fpClaims = fpClaimsRaw ? parseInt(fpClaimsRaw, 10) : 0;
   if (fpClaims >= FREE_CLAIM_FINGERPRINT_MAX) {
+    const { effective } = await getEffectiveBalance(env, clientId);
     return json({
       ok: true, blockedByFingerprint: true, creditsGranted: 0,
       fpClaims, fpMax: FREE_CLAIM_FINGERPRINT_MAX,
-      newBalance: await getBalance(env, clientId),
+      newBalance: effective,
     }, 200, cors);
   }
 
-  // Reserve both slots before doing any writes.
   await env.CREDITS.put(ipKey, String(ipClaims + 1), {
     expirationTtl: FREE_CLAIM_IP_TTL,
   });
@@ -732,7 +725,6 @@ export async function handleClaimFree(request, env, cors) {
     expirationTtl: FREE_CLAIM_FINGERPRINT_TTL,
   });
 
-  // Helper: release both reserved slots on any bail-out path.
   const releaseSlots = async () => {
     await env.CREDITS.put(ipKey, String(ipClaims), {
       expirationTtl: FREE_CLAIM_IP_TTL,
@@ -742,15 +734,15 @@ export async function handleClaimFree(request, env, cors) {
     }).catch(() => {});
   };
 
-  // ---- Window check ----
   const startRaw = await env.CREDITS.get(startKey);
   if (startRaw) {
     const windowStart = new Date(startRaw).getTime();
     if (now - windowStart > FREE_CLAIM_WINDOW_MS) {
       await releaseSlots();
+      const { effective } = await getEffectiveBalance(env, clientId);
       return json({
         ok: true, offerExpired: true, creditsGranted: 0,
-        newBalance: await getBalance(env, clientId),
+        newBalance: effective,
       }, 200, cors);
     }
   } else {
@@ -759,21 +751,36 @@ export async function handleClaimFree(request, env, cors) {
     });
   }
 
-  // ---- Grant ----
-  let newBalance;
+  const grantedAtMs = now;
+
+  // Read the effective balance once, before the grant. This is used
+  // for both the history entry and the response, so there's exactly
+  // one round-trip and the two values can't disagree if a concurrent
+  // request touches the paid balance mid-flight.
+  const preGrant = await getEffectiveBalance(env, clientId);
+
   try {
-    newBalance = await addCredits(env, clientId, FREE_CLAIM_CREDITS, {
-      type: 'free_claim', source: 'launch_bonus',
-      credits: FREE_CLAIM_CREDITS, ip, fingerprint: fp,
+    await writeFreeCredits(env, clientId, FREE_CLAIM_CREDITS, grantedAtMs);
+
+    const historyRaw = await env.CREDITS.get(`history:${clientId}`);
+    const history = historyRaw ? JSON.parse(historyRaw) : [];
+    history.unshift({
+      delta: FREE_CLAIM_CREDITS,
+      balance: preGrant.effective + FREE_CLAIM_CREDITS,
+      at: new Date(grantedAtMs).toISOString(),
+      type: 'free_claim',
+      source: 'launch_bonus',
+      credits: FREE_CLAIM_CREDITS,
+      ip,
+      fingerprint: fp,
+      expiresAt: new Date(grantedAtMs + FREE_CLAIM_USE_WINDOW_MS).toISOString(),
     });
+    await env.CREDITS.put(`history:${clientId}`, JSON.stringify(history.slice(0, 50)));
   } catch (e) {
     await releaseSlots();
     throw e;
   }
 
-  // Write the client metadata for the admin dashboard. Only happens
-  // once per clientId (the grant is single-shot), so this is one KV
-  // write on the free-claim path and none elsewhere.
   await env.CREDITS.put(`client_meta:${clientId}`, JSON.stringify({
     fingerprint: fp || null,
     ip,
@@ -786,7 +793,11 @@ export async function handleClaimFree(request, env, cors) {
   });
 
   return json({
-    ok: true, creditsGranted: FREE_CLAIM_CREDITS, newBalance,
+    ok: true, creditsGranted: FREE_CLAIM_CREDITS,
+    newBalance: preGrant.effective + FREE_CLAIM_CREDITS,
+    freeAmount: FREE_CLAIM_CREDITS,
+    useExpiresAt: new Date(grantedAtMs + FREE_CLAIM_USE_WINDOW_MS).toISOString(),
+    useMsRemaining: FREE_CLAIM_USE_WINDOW_MS,
     windowEnd: new Date(now + FREE_CLAIM_WINDOW_MS).toISOString(),
     ipClaims: ipClaims + 1, ipMax: FREE_CLAIM_IP_MAX,
     fpClaims: fpClaims + 1, fpMax: FREE_CLAIM_FINGERPRINT_MAX,
@@ -795,20 +806,6 @@ export async function handleClaimFree(request, env, cors) {
 
 // =====================================================================
 // GAS SPONSORSHIP
-// =====================================================================
-//
-// The worker decides the amount, not the client. `shortfallWei` from
-// the client is treated as a *hint* that the wallet is short; the
-// worker independently reads the on-chain balance and computes the
-// real shortfall from SPONSOR_TARGET_WEI. This closes the "free ETH
-// faucet" hole where a client could ask for any amount up to the cap.
-//
-// Idempotency: repeated requests for the same (chain, toAddress)
-// within SPONSOR_IDEM_TTL return the first call's result without
-// sending again. This prevents a client that retries on a network
-// blip (or an attacker replaying the request) from getting two
-// sends. After the TTL expires, the "user already funded" check takes
-// over.
 // =====================================================================
 
 export async function handleGasSponsor(request, env, cors) {
@@ -823,8 +820,6 @@ export async function handleGasSponsor(request, env, cors) {
   if (!toAddress || !/^0x[a-fA-F0-9]{40}$/.test(toAddress)) return json({ error: 'valid toAddress required' }, 400, cors);
   if (!shortfallWei || !/^\d+$/.test(String(shortfallWei))) return json({ error: 'shortfallWei required (decimal string)' }, 400, cors);
 
-  // The client's hint is only used to reject obviously-bogus requests.
-  // The actual send amount is computed below from chain state.
   const clientHint = BigInt(shortfallWei);
   if (clientHint === 0n) return json({ ok: true, sent: '0', reason: 'no shortfall' }, 200, cors);
 
@@ -833,9 +828,6 @@ export async function handleGasSponsor(request, env, cors) {
 
   if (!env.GAS_SPONSOR_KEY) return json({ error: 'sponsor not configured' }, 500, cors);
 
-  // Idempotency check: same (chain, toAddress) within the window
-  // returns the prior result. Keyed on the normalised address so case
-  // doesn't cause a duplicate send.
   const idemKey = `sponsor:idem:${chain}:${toAddress.toLowerCase()}`;
   const prior = await env.CREDITS.get(idemKey);
   if (prior) {
@@ -849,10 +841,6 @@ export async function handleGasSponsor(request, env, cors) {
     }
   }
 
-  // Build the sponsor wallet. Accepts a hex private key OR a BIP-39
-  // mnemonic. `buildSponsorWallet` detects the shape and picks the
-  // right ethers constructor. If the secret is neither, we throw a
-  // static message that doesn't include the secret value.
   let sponsorWallet;
   try {
     sponsorWallet = buildSponsorWallet(env.GAS_SPONSOR_KEY, new ethers.JsonRpcProvider(SPONSOR_RPC[chain]));
@@ -864,8 +852,6 @@ export async function handleGasSponsor(request, env, cors) {
   const provider = sponsorWallet.provider;
   const sponsorAddress = await sponsorWallet.getAddress();
 
-  // Authoritative shortfall: read the user's on-chain balance and
-  // compute how much is needed to reach SPONSOR_TARGET_WEI.
   const target = ethers.parseEther(SPONSOR_TARGET_WEI[chain]);
   const userBalance = await provider.getBalance(toAddress);
   if (userBalance >= target) {
@@ -874,7 +860,6 @@ export async function handleGasSponsor(request, env, cors) {
   let shortfall = target - userBalance;
   if (shortfall > maxSend) shortfall = maxSend;
 
-  // Check the sponsor can cover the send plus a small gas buffer.
   const sponsorBalance = await provider.getBalance(sponsorAddress);
   const feeData = await provider.getFeeData();
   const gasPrice = feeData.gasPrice ?? 0n;
@@ -893,15 +878,12 @@ export async function handleGasSponsor(request, env, cors) {
     const tx = await sponsorWallet.sendTransaction({ to: toAddress, value: shortfall });
     await tx.wait(1);
 
-    // Record the send so a retry within the window doesn't send again.
     await env.CREDITS.put(idemKey, JSON.stringify({
       sent: shortfall.toString(), txHash: tx.hash, at: new Date().toISOString(),
     }), { expirationTtl: SPONSOR_IDEM_TTL }).catch(() => {});
 
     return json({ ok: true, sent: shortfall.toString(), txHash: tx.hash }, 200, cors);
   } catch (e) {
-    // Never echo e.message. Ethers v6 embeds the offending argument in
-    // its error messages, which can be the private key or mnemonic.
     console.error('Sponsor send failed for chain', chain);
     return json({ error: 'sponsor send failed' }, 500, cors);
   }
@@ -937,18 +919,7 @@ export async function checkSponsorRate(env, ip) {
 }
 
 // =====================================================================
-// SWEEP COMMIT — server-authoritative destination
-// =====================================================================
-//
-// Committed before the sweep begins. /fee/record reads the commit and
-// overwrites any client-supplied userDestination. This closes the hole
-// where a client could submit a fake receipt pointing at an attacker
-// address; the operator view will only ever show the destination that
-// was committed up front.
-//
-// The commit is keyed by sweepId and is idempotent: re-calling with
-// the same sweepId + destination returns `alreadyCommitted: true`.
-// Changing the destination for an existing sweep is refused with 409.
+// SWEEP COMMIT
 // =====================================================================
 
 export async function handleSweepCommit(request, env, cors) {
@@ -987,7 +958,7 @@ export async function handleSweepCommit(request, env, cors) {
 }
 
 // =====================================================================
-// FEE RECORDING — operator view for the manual forward model
+// FEE RECORDING
 // =====================================================================
 
 export async function handleFeeRecord(request, env, cors) {
@@ -1010,16 +981,11 @@ export async function handleFeeRecord(request, env, cors) {
     return json({ error: 'receipts required (non-empty array)' }, 400, cors);
   }
 
-  // Idempotency: if this sweepId was already recorded, return success
-  // without doing anything. Protects against client retries.
   const existingRaw = await env.CREDITS.get(`fee:sweep:${sweepId}`);
   if (existingRaw) {
     return json({ ok: true, sweepId, alreadyRecorded: true, status: 'pending' }, 200, cors);
   }
 
-  // Load the sweep commit written at sweep start. This is the
-  // authoritative source for the destination address. If no commit
-  // exists, the sweep was never registered and we refuse to record it.
   const commitRaw = await env.CREDITS.get(`sweep:${sweepId}`);
   if (!commitRaw) {
     return json({ error: 'sweepId not committed — call /sweep/commit before sweeping' }, 400, cors);
@@ -1032,10 +998,6 @@ export async function handleFeeRecord(request, env, cors) {
   }
   const authoritativeDestination = commit.userDestination;
 
-  // Validate every receipt's shape so buildOperatorView can't throw
-  // on malformed input. Rejects the whole batch rather than partially
-  // recording. Also overwrite the client-supplied userDestination with
-  // the committed one — the client's version is never trusted.
   for (let i = 0; i < receipts.length; i++) {
     const r = receipts[i];
     if (!r || typeof r !== 'object') {
@@ -1063,10 +1025,6 @@ export async function handleFeeRecord(request, env, cors) {
       return json({ error: `receipt[${i}].userDestination must be a 0x address` }, 400, cors);
     }
 
-    // If the client sent a destination different from what was
-    // committed, log it. This is a tamper signal — the worker uses the
-    // committed value regardless, but the operator should know if a
-    // client tried to substitute a different address.
     if (r.userDestination.toLowerCase() !== authoritativeDestination.toLowerCase()) {
       console.warn('Destination mismatch on fee record', {
         sweepId,
@@ -1076,8 +1034,6 @@ export async function handleFeeRecord(request, env, cors) {
       });
     }
 
-    // Ignore whatever the client sent. Replace with the committed
-    // destination. This is the whole point of the sweep-commit flow.
     r.userDestination = authoritativeDestination;
   }
 
@@ -1105,12 +1061,6 @@ export async function handleFeeRecord(request, env, cors) {
   return json({ ok: true, sweepId, status: 'pending' }, 200, cors);
 }
 
-/**
- * Scale a 6-decimal USDC amount to the target decimals. Sponsorship
- * fees are always stored as 6-decimal USDC (from usdCentsToUsdcRaw).
- * Some chains use different USDC decimals (BNB is 18), so we scale
- * before subtracting.
- */
 export function scaleUsdcToDecimals(amount6, targetDecimals) {
   const a = BigInt(amount6);
   if (targetDecimals === 6) return a;
@@ -1132,9 +1082,6 @@ export function buildOperatorView(receipts, gasSponsorships) {
     const userAmount = BigInt(r.userShareRaw || '0');
     const est = r.estimated ? ' (est.)' : '';
 
-    // Sum the sponsorship fees for this chain, scaled from 6-decimal
-    // USDC to the receipt's decimals. For non-EVM receipts, no
-    // sponsorship applies.
     let sponsorFee = 0n;
     if (r.family === 'evm') {
       for (const gs of gasSponsorships) {
@@ -1434,12 +1381,13 @@ export async function handleAdminCreditsLookup(request, env, cors) {
     return json({ error: 'clientId required' }, 400, cors);
   }
 
-  const balance = await getBalance(env, clientId);
+  const { paid, free, effective } = await getEffectiveBalance(env, clientId);
+  const balance = effective;
   const historyRaw = await env.CREDITS.get(`history:${clientId}`);
   let history = [];
   try { history = historyRaw ? JSON.parse(historyRaw) : []; } catch { history = []; }
 
-  return json({ ok: true, clientId, balance, history }, 200, cors);
+  return json({ ok: true, clientId, balance, paid, free, history }, 200, cors);
 }
 
 export async function handleAdminCreditsList(request, env, cors) {
@@ -1449,19 +1397,18 @@ export async function handleAdminCreditsList(request, env, cors) {
   const url = new URL(request.url);
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
 
-  // list() returns keys under the given prefix. The balance:<id>
-  // keys are what we want. Results are paginated but for a first
-  // pass we cap at `limit` entries.
   const listed = await env.CREDITS.list({ prefix: 'balance:', limit });
 
   const items = [];
   for (const key of listed.keys) {
     const clientId = key.name.slice('balance:'.length);
     const raw = await env.CREDITS.get(key.name);
-    const balance = raw ? parseInt(raw, 10) : 0;
+    const paid = raw ? parseInt(raw, 10) : 0;
 
-    // Look up the metadata if this client claimed free credits. Paying
-    // clients won't have a client_meta record and will show nulls.
+    const free = await readFreeCredits(env, clientId);
+    const freeAmount = free ? free.amount : 0;
+    const balance = paid + freeAmount;
+
     const metaRaw = await env.CREDITS.get(`client_meta:${clientId}`);
     let meta = { fingerprint: null, ip: null, host: null, firstSeen: null };
     if (metaRaw) {
@@ -1476,7 +1423,7 @@ export async function handleAdminCreditsList(request, env, cors) {
       } catch { /* leave defaults */ }
     }
 
-    items.push({ clientId, balance, ...meta });
+    items.push({ clientId, balance, paid, free: freeAmount, ...meta });
   }
 
   return json({
@@ -1498,10 +1445,6 @@ export async function handleAdminClientLookupByFingerprint(request, env, cors) {
     return json({ error: 'fingerprint required' }, 400, cors);
   }
 
-  // Scan client_meta:* keys. Cloudflare KV's list() supports prefix
-  // but not value filtering, so we page through and filter in code.
-  // At 100 clients this is fine; at 10k it's slow. If that becomes a
-  // problem, maintain a reverse index (fingerprint → clientIds).
   const listed = await env.CREDITS.list({ prefix: 'client_meta:', limit: 1000 });
   const matches = [];
 
@@ -1512,8 +1455,8 @@ export async function handleAdminClientLookupByFingerprint(request, env, cors) {
     let meta;
     try { meta = JSON.parse(raw); } catch { continue; }
     if (meta.fingerprint === fingerprint) {
-      const balance = await getBalance(env, clientId);
-      matches.push({ clientId, balance, ...meta });
+      const { effective } = await getEffectiveBalance(env, clientId);
+      matches.push({ clientId, balance: effective, ...meta });
     }
   }
 
@@ -1546,9 +1489,11 @@ export {
   CRYPTO_VERIFY_LOCK_TTL,
   FREE_CLAIM_CREDITS,
   FREE_CLAIM_WINDOW_MS,
+  FREE_CLAIM_USE_WINDOW_MS,
   FREE_CLAIM_IP_MAX,
   FREE_CLAIM_FINGERPRINT_MAX,
   FREE_CLAIM_FINGERPRINT_TTL,
+  FREE_CREDITS_TTL,
   SWEEP_COMMIT_TTL,
   ADMIN_AUTH_FAIL_MAX,
   ADMIN_AUTH_FAIL_WINDOW_MS,

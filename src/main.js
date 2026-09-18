@@ -34,6 +34,13 @@
  *   dry-run, the modal copy says so, so it doesn't look like the
  *   mode selection was ignored.
  *
+ * Free credits:
+ *   The launch bonus grants 2 free credits with two separate 24h
+ *   clocks: 24h to claim, then 24h to use. Free credits live in their
+ *   own pool on the worker and are consumed before paid credits. The
+ *   badge shows a countdown while the free pool is live; the banner
+ *   shows the same countdown right after a fresh claim.
+ *
  * Retry logic lives in ./retry.js and is injected with its network
  * dependencies here, so the loop mechanics are testable in Node.
  */
@@ -57,7 +64,7 @@ import { previewBitcoinWallet, sweepBitcoin, estimateBitcoinValueUsdc } from './
 import { $, $$, el, show, hide, logLine, clearLog, showAutoLiveConfirm } from './ui.js';
 import { initSentry, initPlausible, reportError, track } from './telemetry.js';
 import {
-  getClientId, fetchBalance, consumeCredit, invalidateBalanceCache,
+  getClientId, fetchBalance, fetchBalanceSnapshot, consumeCredit, invalidateBalanceCache,
   recordFee, requestGasSponsorship,
   fetchClaimInfo, claimFreeCredits,
   commitSweep,
@@ -84,6 +91,10 @@ import {
 const WC_PROJECT_ID = '74d3ed4f87d14b6cac7556234dfb72a3';
 
 let freeClaimTimer = null;
+
+// Ticks the badge every 60s so "23h left" doesn't go stale. Cleared
+// whenever the badge is re-rendered from a fresh fetch.
+let creditsBadgeTimer = null;
 
 // Minimum USD value a chain's sweepable balance must be worth before
 // we'll sponsor gas to move it. Set low (2 cents) so dust sweeps still
@@ -226,16 +237,69 @@ function validateInputs({ walletType, families, destinations, mnemonics }) {
   return { errors, warnings };
 }
 
-function updateCreditsBadge(balance) {
+/**
+ * Render the credits badge.
+ *
+ * `input` is either a plain number (backwards compatible — no
+ * countdown) or a snapshot object { balance, free, freeExpiresAt }.
+ *
+ * When the free pool is the source of the credits and it has an
+ * expiry, the badge shows a countdown ("2 credits · 23h left") and
+ * schedules a per-minute re-render so the count doesn't go stale
+ * between fetches.
+ */
+function updateCreditsBadge(input) {
   const badge = $('#credits-badge');
   if (!badge) return;
-  if (balance > 0) {
-    badge.textContent = `${balance} credit${balance > 1 ? 's' : ''}`;
-    badge.className = 'credits-badge credits-available';
-  } else {
-    badge.textContent = 'No credits';
-    badge.className = 'credits-badge credits-empty';
+
+  if (creditsBadgeTimer) {
+    clearInterval(creditsBadgeTimer);
+    creditsBadgeTimer = null;
   }
+
+  const snapshot = (input && typeof input === 'object')
+    ? input
+    : { balance: Number(input) || 0, free: 0, freeExpiresAt: null };
+
+  const balance = snapshot.balance || 0;
+  const freeExpiresAt = snapshot.freeExpiresAt;
+
+  const render = () => {
+    if (balance <= 0) {
+      badge.textContent = 'No credits';
+      badge.className = 'credits-badge credits-empty';
+      return;
+    }
+
+    const noun = balance === 1 ? 'credit' : 'credits';
+    let suffix = '';
+
+    if (freeExpiresAt) {
+      const msLeft = new Date(freeExpiresAt).getTime() - Date.now();
+      if (msLeft > 0) {
+        suffix = ` · ${formatRemaining(msLeft)} left`;
+      }
+    }
+
+    badge.textContent = `${balance} ${noun}${suffix}`;
+    badge.className = 'credits-badge credits-available';
+  };
+
+  render();
+
+  // Only schedule ticks when there's an active free-pool countdown.
+  if (balance > 0 && freeExpiresAt && new Date(freeExpiresAt).getTime() > Date.now()) {
+    creditsBadgeTimer = setInterval(render, 60 * 1000);
+  }
+}
+
+function formatRemaining(ms) {
+  const totalMin = Math.floor(ms / 60000);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h >= 1) return `${h}h`;
+  if (m >= 1) return `${m}m`;
+  return 'soon';
 }
 
 function syncDestinationFields() {
@@ -301,20 +365,8 @@ async function withGasSponsorship(chain, walletAddress, action) {
 // =====================================================================
 // AUTO-LIVE — value estimates + eligibility
 // =====================================================================
-//
-// Computed inside runPreview, stored on state.previews, and consumed
-// by maybeAutoLive() so the modal can pop instantly. runSweep reuses
-// the same cached values to gate the auto-live credit waiver — no
-// second round of network calls.
-//
-// An "eligible" entry is a (family, index, chain) tuple whose USD
-// value is at or above AUTO_LIVE_THRESHOLD_USDC. We compare per
-// wallet+chain, not in aggregate, so a wallet with $49 doesn't get
-// swept live just because three other wallets push the total past $50.
-// =====================================================================
 
 async function annotatePreviewValues(inputs) {
-  // EVM: annotate each preview entry in place.
   if (inputs.families.evm) {
     for (const p of state.previews.evm) {
       try {
@@ -325,7 +377,6 @@ async function annotatePreviewValues(inputs) {
     }
   }
 
-  // Solana: annotate each preview entry in place.
   if (inputs.families.solana) {
     for (const p of state.previews.solana) {
       try {
@@ -336,7 +387,6 @@ async function annotatePreviewValues(inputs) {
     }
   }
 
-  // Bitcoin: annotate each preview entry in place.
   if (inputs.families.bitcoin) {
     for (const p of state.previews.bitcoin) {
       try {
@@ -348,11 +398,6 @@ async function annotatePreviewValues(inputs) {
   }
 }
 
-/**
- * Walk state.previews and return every entry whose _usdValue is at or
- * above AUTO_LIVE_THRESHOLD_USDC. Each entry carries enough info for
- * runSweep to identify it: family, chain (EVM only), address, index.
- */
 function collectEligible() {
   const eligible = [];
 
@@ -375,19 +420,6 @@ function collectEligible() {
   return eligible;
 }
 
-/**
- * Called at the end of runPreview. If any eligible entry exists, shows
- * the countdown modal (or fires immediately, if
- * AUTO_LIVE_REQUIRE_CONFIRM is false) and then runs the live sweep
- * scoped to the eligible entries.
- *
- * Note: auto-live deliberately ignores the Mode radio. The countdown
- * modal IS the confirmation, and it gives the user a full
- * AUTO_LIVE_COUNTDOWN_SECONDS window to cancel. The intent is to
- * reduce friction for the common case (wallet ≥ $50, user wants it
- * swept) while keeping a reversible safety net (Cancel). When the
- * user had dry-run selected, the modal says so explicitly.
- */
 async function maybeAutoLive() {
   const eligible = collectEligible();
   if (eligible.length === 0) return;
@@ -427,15 +459,25 @@ function renderFreeClaimBanner(info) {
     freeClaimTimer = null;
   }
 
+  // After a claim, if the free pool is still live, show the use-
+  // window countdown. Once it's spent or expired, hide the banner —
+  // the badge is the source of truth at that point.
   if (info.claimed) {
-    if (info.__fresh) {
+    const freeAmount = info.freeAmount ?? 0;
+    const useMsRemaining = info.useMsRemaining ?? 0;
+
+    if (freeAmount > 0 && useMsRemaining > 0 && info.__fresh) {
+      const expiresAt = new Date(Date.now() + useMsRemaining);
+      const expiresHH = String(expiresAt.getHours()).padStart(2, '0');
+      const expiresMM = String(expiresAt.getMinutes()).padStart(2, '0');
+
       banner.style.display = '';
       banner.innerHTML = `
         <div class="free-claim-inner">
           <span class="free-claim-icon">✓</span>
           <div class="free-claim-text">
-            <strong>${info.creditsGranted} free credits added</strong>
-            <p>Your launch bonus is ready to use. Credits never expire.</p>
+            <strong>${freeAmount} free credits added</strong>
+            <p>Use them within 24 hours — they expire at ${expiresHH}:${expiresMM}.</p>
           </div>
         </div>
       `;
@@ -484,7 +526,7 @@ function renderFreeClaimBanner(info) {
         <span class="free-claim-icon">⏱</span>
         <div class="free-claim-text">
           <strong>Your 24-hour claim window has ended</strong>
-          <p>Free credits are no longer available on this browser.</p>
+          <p>Free credits won't be available again for 7 days.</p>
         </div>
       </div>
     `;
@@ -497,10 +539,10 @@ function renderFreeClaimBanner(info) {
     <div class="free-claim-inner">
       <span class="free-claim-icon">🎁</span>
       <div class="free-claim-text">
-        <strong>3 free sweep credits</strong>
+        <strong>Claim 2 free sweep credits</strong>
         <p>${isRunning
-          ? `Claim within <span id="free-claim-countdown">--:--:--</span>`
-          : `Claim now to start your 24-hour window`}</p>
+          ? `Offer expires in <span id="free-claim-countdown">--:--:--</span>. Once claimed, use them within 24 hours.`
+          : `Claim within 24 hours. Once claimed, use them within 24 hours.`}</p>
       </div>
       <button id="free-claim-button" class="btn btn-primary btn-sm">Claim now</button>
     </div>
@@ -536,7 +578,7 @@ function renderFreeClaimBanner(info) {
         const fingerprint = await getFingerprint();
         const result = await claimFreeCredits(fingerprint);
         if (result.creditsGranted > 0) {
-          logLine(`Welcome bonus: ${result.creditsGranted} free sweep credits added.`);
+          logLine(`Welcome bonus: ${result.creditsGranted} free sweep credits added. Use them within 24 hours.`);
         } else if (result.blockedByFingerprint) {
           logLine(`Free credits already claimed on this device (${result.fpClaims}/${result.fpMax}).`);
         } else if (result.blockedByIp) {
@@ -546,8 +588,8 @@ function renderFreeClaimBanner(info) {
         } else if (result.alreadyClaimed) {
           logLine('Free credits already claimed.');
         }
-        const newBalance = await fetchBalance({ force: true });
-        updateCreditsBadge(newBalance);
+        const snap = await fetchBalanceSnapshot({ force: true });
+        updateCreditsBadge(snap);
         const freshInfo = await fetchClaimInfo();
         renderFreeClaimBanner({ ...freshInfo, ...result, __fresh: true });
       } catch (err) {
@@ -721,10 +763,6 @@ async function runPreview() {
     }
 
     // ---- USD annotations for the auto-live threshold ----
-    // Runs before "Preview complete" prints so the modal can pop the
-    // instant the user sees the preview has finished. This is the same
-    // network-call set that runSweep would do anyway, just done once
-    // and cached on state.previews.
     logLine('\nEstimating sweepable value...');
     await annotatePreviewValues(inputs);
     const totalUsd = [
@@ -744,10 +782,6 @@ async function runPreview() {
     track.previewCompleted({ walletType: inputs.walletType, durationMs: Date.now() - startTime, tokensFound });
 
     // ---- Auto-live offer ----
-    // If any wallet+chain clears the threshold, offer to skip the
-    // manual Run click. This can be disabled by flipping
-    // AUTO_LIVE_REQUIRE_CONFIRM to false (zero-click) or by setting
-    // AUTO_LIVE_THRESHOLD_USDC to Infinity in config.js.
     await maybeAutoLive();
   } catch (e) {
     reportError(e, { phase: 'preview_fatal' });
@@ -775,23 +809,17 @@ async function requirePayment() {
 
 async function runSweep(live, opts = {}) {
   const autoLive = !!opts.autoLive;
-  const onlyEligible = opts.onlyEligible || null;   // array of {family, chain?, address, index}
+  const onlyEligible = opts.onlyEligible || null;
 
   const startTime = Date.now();
   if (!state.derivedKeys) { logLine('ERROR: run Preview first'); return; }
 
-  // Stable ID for this sweep attempt. Used as the idempotency key when
-  // recording the fee on the worker, so retrying recordFee won't
-  // create duplicate entries. Also the key for the sweep commit and
-  // for the credit consumption.
   const sweepId = crypto.randomUUID();
 
   const inputs = readInputs();
   const destinations = inputs.destinations;
   const families = inputs.families;
 
-  // Helper: is this (family, chain, index) in the onlyEligible list?
-  // When onlyEligible is null, everything is eligible.
   const isEligible = (family, chain, index) => {
     if (!onlyEligible) return true;
     return onlyEligible.some((e) =>
@@ -807,9 +835,6 @@ async function runSweep(live, opts = {}) {
     logLine('  Bitcoin fees are deducted from the swept UTXOs.');
 
     if (autoLive) {
-      // Auto-live waives the credit. The 10% service fee is the
-      // operator's compensation, and only wallets ≥ $50 take this
-      // path, so the fee comfortably covers the cost of a credit.
       logLine('  (auto-live — no credit required)');
     } else {
       let balance = await fetchBalance();
@@ -827,11 +852,6 @@ async function runSweep(live, opts = {}) {
       if (balance < 1) { logLine('ERROR: still no credits after payment.'); return; }
     }
 
-    // Commit the sweep's destination to the worker before consuming a
-    // credit (or before sweeping, in the auto-live case). This is the
-    // authoritative record of where the user wants funds sent —
-    // /fee/record will refuse the sweep if no commit exists, and will
-    // overwrite any client-supplied destination with the committed one.
     try {
       await commitSweepWithRetry(sweepId, destinations.evm, logLine);
       logLine(`  Sweep destination committed: ${destinations.evm}`);
@@ -841,13 +861,11 @@ async function runSweep(live, opts = {}) {
     }
 
     if (!autoLive) {
-      // Consume the credit. The sweepId is passed so that a retry
-      // after a network blip doesn't double-charge. The worker dedups
-      // on it.
       try {
         const newBalance = await consumeCredit('sweep', sweepId);
         logLine(`Credit consumed. Remaining: ${newBalance}`);
-        updateCreditsBadge(newBalance);
+        const snap = await fetchBalanceSnapshot({ force: true });
+        updateCreditsBadge(snap);
       } catch (err) {
         logLine(`ERROR: could not consume credit: ${scrubSecret(err.message)}`);
         return;
@@ -938,16 +956,7 @@ async function runSweep(live, opts = {}) {
             const preview = state.previews.evm.find((p) => p.address === address && p.chain === chain);
             const tokens = preview?.tokens || [];
 
-            // Sponsorship gate (live only):
-            //   1. value <= 0        → nothing worth sweeping. Skip
-            //   2. 0 < value < floor → dust above zero but below the
-            //                          sponsor floor. Print the skip
-            //                          line and remember the chain.
-            //   3. value >= floor    → run the sweep.
             if (live) {
-              // Reuse the cached value when we have it; only recompute
-              // for the paths that skipped annotation (e.g. manual Run
-              // after a preview that errored partway).
               const chainValueUsdc = (typeof preview?._usdValue === 'number')
                 ? preview._usdValue
                 : await estimateChainValueUsdc(chain, preview);
@@ -1342,8 +1351,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     });
 
-  const balance = await fetchBalance();
-  updateCreditsBadge(balance);
+  const snap = await fetchBalanceSnapshot();
+  updateCreditsBadge(snap);
 
   $$('input[name=wallet-type]').forEach((radio) => {
     radio.addEventListener('change', (e) => {
@@ -1379,8 +1388,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('#buy-credits-button')?.addEventListener('click', async () => {
     try {
       await requirePayment();
-      const newBalance = await fetchBalance({ force: true });
-      updateCreditsBadge(newBalance);
+      const newSnap = await fetchBalanceSnapshot({ force: true });
+      updateCreditsBadge(newSnap);
     } catch (err) { console.error('Buy credits failed:', scrubSecret(err.message)); }
   });
 
@@ -1399,7 +1408,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       state.mode = e.target.value;
       const runBtn = $('#run-button');
       if (runBtn) {
-        runBtn.textContent = state.mode === 'live' ? '⚡ EXECUTE LIVE SWEEP' : '▶ Run Dry Run';
+        runBtn.textContent = state.mode === 'live' ? '⚡ EXECUTE LIVE SWEEP' : '▶ Run Dry Sweep';
         runBtn.className = state.mode === 'live' ? 'btn btn-danger' : 'btn btn-primary';
       }
       const warning = $('#live-warning');
