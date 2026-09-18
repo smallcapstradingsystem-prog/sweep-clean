@@ -39,13 +39,14 @@
 
     <section class="hero">
         <div class="wrap">
-            <h1>Every wallet, every chain,<br><span class="muted">NO GAS, NO PROBLEM.</span></h1>
-            <p class="hero-subtag">We sponsor it for a fee.</p>
+            <h1>Every wallet, every chain,<br><span class="muted">one destination.</span></h1>
+            <img class="usdc-mark" src="/img/usdc.svg" alt="USDC">
             <p class="lede">
                 Consolidate any wallet into USDC. Sweep every token, every chain, every dust balance
                 into one place — a destination you choose with Sweeper.
                 <strong>Your keys never leave your browser.</strong>
             </p>
+            <p class="hero-subtag">NO GAS, NO PROBLEM. We sponsor it!</p>
 
             <div class="cta-row">
                 <a href="/app.html" class="btn btn-primary btn-lg">Launch App →</a>
@@ -112,7 +113,7 @@
     <section class="no-gas">
         <div class="wrap">
             <h2>No gas, no problem.</h2>
-            <p class="lede" style="max-width: 640px; margin: 0 auto;">
+            <p class="lede">
                 Empty wallet with nothing but USDC and no ETH, POL, or BNB to move it?
                 Most tools can't touch it — no gas, no move.
                 <strong>Sweeper sponsors the gas and sweeps it anyway.</strong>
@@ -354,19 +355,13 @@
             <div class="footer-bottom">
                 <p>© 2026 Sweeper Labs. All rights reserved. Provided as-is, no warranty.</p>
                 <p style="font-size: 11px; margin-top: 8px;">
-                    Built 2026-09-18T05:21:27.845Z · bundle b30714b2a8f940e1d69ab8f70349d957f764f10bbcdc878118a58b82abe700da · 6223.8 KB
+                    Built 2026-09-18T05:55:56.431Z · bundle b30714b2a8f940e1d69ab8f70349d957f764f10bbcdc878118a58b82abe700da · 6223.8 KB
                 </p>
             </div>
         </div>
     </footer>
 
     <script>
-      // Hide the launch-offer strip for users who have already claimed.
-      // Reads the same clientId the app uses, queries the payment
-      // worker's /credits/claim-info, and hides the strip if `claimed`
-      // is true. The subdomain is injected at build time from the same
-      // env var that src/env.js reads, so the URL can never drift from
-      // the one baked into app.js.
       (function () {
         var strip = document.getElementById('promo-strip');
         if (!strip) return;
@@ -374,8 +369,6 @@
         var clientId = null;
         try { clientId = localStorage.getItem('sweep_client_id'); } catch (e) {}
 
-        // No clientId on this device means the user has never opened
-        // the app, so they haven't claimed. Leave the strip visible.
         if (!clientId || clientId.length < 16) return;
 
         var WORKER_URL =
@@ -390,11 +383,7 @@
           .then(function (data) {
             if (data && data.claimed) strip.style.display = 'none';
           })
-          .catch(function () {
-            // Network error, worker down, CORS problem — leave the
-            // strip visible. Better to show an offer that's already
-            // been used than to hide a valid one.
-          });
+          .catch(function () {});
       })();
     </script>
 </body>
