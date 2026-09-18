@@ -16,7 +16,15 @@ describe('credits', () => {
       const req = makeRequest({ body: { clientId: CLIENT_ID } });
       const resp = await readResponse(await handleCreditsBalance(req, env, CORS));
       expect(resp.status).toBe(200);
-      expect(resp.body).toEqual({ clientId: CLIENT_ID, balance: 0 });
+      // The worker now returns paid/free/freeExpiresAt alongside
+      // balance. With no balance and no free pool, all three are 0/null.
+      expect(resp.body).toEqual({
+        clientId: CLIENT_ID,
+        balance: 0,
+        paid: 0,
+        free: 0,
+        freeExpiresAt: null,
+      });
     });
 
     it('returns the stored balance', async () => {
@@ -24,6 +32,39 @@ describe('credits', () => {
       const req = makeRequest({ body: { clientId: CLIENT_ID } });
       const resp = await readResponse(await handleCreditsBalance(req, env, CORS));
       expect(resp.body.balance).toBe(7);
+      expect(resp.body.paid).toBe(7);
+      expect(resp.body.free).toBe(0);
+      expect(resp.body.freeExpiresAt).toBeNull();
+    });
+
+    it('includes a live free pool in the effective balance', async () => {
+      await env.CREDITS.put(`balance:${CLIENT_ID}`, '7');
+      await env.CREDITS.put(`free_credits:${CLIENT_ID}`, JSON.stringify({
+        amount: 2,
+        grantedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }));
+      const req = makeRequest({ body: { clientId: CLIENT_ID } });
+      const resp = await readResponse(await handleCreditsBalance(req, env, CORS));
+      expect(resp.body.balance).toBe(9);
+      expect(resp.body.paid).toBe(7);
+      expect(resp.body.free).toBe(2);
+      expect(resp.body.freeExpiresAt).toMatch(/^\d{4}-\d{2}-\d{2}/);
+    });
+
+    it('ignores an expired free pool', async () => {
+      await env.CREDITS.put(`balance:${CLIENT_ID}`, '7');
+      await env.CREDITS.put(`free_credits:${CLIENT_ID}`, JSON.stringify({
+        amount: 2,
+        grantedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+        expiresAt: new Date(Date.now() - 60 * 1000).toISOString(),
+      }));
+      const req = makeRequest({ body: { clientId: CLIENT_ID } });
+      const resp = await readResponse(await handleCreditsBalance(req, env, CORS));
+      expect(resp.body.balance).toBe(7);
+      expect(resp.body.paid).toBe(7);
+      expect(resp.body.free).toBe(0);
+      expect(resp.body.freeExpiresAt).toBeNull();
     });
 
     it('rejects a missing clientId', async () => {
@@ -41,6 +82,7 @@ describe('credits', () => {
       expect(resp.status).toBe(200);
       expect(resp.body.ok).toBe(true);
       expect(resp.body.newBalance).toBe(4);
+      expect(resp.body.pool).toBe('paid');
       expect(resp.body.alreadyConsumed).toBeUndefined();
     });
 
@@ -97,6 +139,94 @@ describe('credits', () => {
       ));
       expect(resp.body.newBalance).toBe(3);
       expect(resp.body.alreadyConsumed).toBeUndefined();
+    });
+
+    it('spends from the free pool before paid', async () => {
+      await env.CREDITS.put(`balance:${CLIENT_ID}`, '5');
+      await env.CREDITS.put(`free_credits:${CLIENT_ID}`, JSON.stringify({
+        amount: 2,
+        grantedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }));
+
+      const resp = await readResponse(await handleCreditsConsume(
+        makeRequest({ body: { clientId: CLIENT_ID } }),
+        env, CORS,
+      ));
+      expect(resp.body.pool).toBe('free');
+      expect(resp.body.newBalance).toBe(6); // 5 paid + 1 free remaining
+
+      // Paid balance in KV is untouched.
+      expect(await getBalance(env, CLIENT_ID)).toBe(5);
+
+      // Free record decremented to 1.
+      const rec = JSON.parse(await env.CREDITS.get(`free_credits:${CLIENT_ID}`));
+      expect(rec.amount).toBe(1);
+    });
+
+    it('falls through to paid when the free pool is empty', async () => {
+      await env.CREDITS.put(`balance:${CLIENT_ID}`, '5');
+
+      const resp = await readResponse(await handleCreditsConsume(
+        makeRequest({ body: { clientId: CLIENT_ID } }),
+        env, CORS,
+      ));
+      expect(resp.body.pool).toBe('paid');
+      expect(resp.body.newBalance).toBe(4);
+      expect(await getBalance(env, CLIENT_ID)).toBe(4);
+    });
+
+    it('treats an expired free pool as empty', async () => {
+      await env.CREDITS.put(`balance:${CLIENT_ID}`, '5');
+      await env.CREDITS.put(`free_credits:${CLIENT_ID}`, JSON.stringify({
+        amount: 2,
+        grantedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+        expiresAt: new Date(Date.now() - 60 * 1000).toISOString(),
+      }));
+
+      const resp = await readResponse(await handleCreditsConsume(
+        makeRequest({ body: { clientId: CLIENT_ID } }),
+        env, CORS,
+      ));
+      expect(resp.body.pool).toBe('paid');
+      expect(resp.body.newBalance).toBe(4);
+    });
+
+    it('deletes the free_credits key when the pool hits zero', async () => {
+      await env.CREDITS.put(`balance:${CLIENT_ID}`, '5');
+      await env.CREDITS.put(`free_credits:${CLIENT_ID}`, JSON.stringify({
+        amount: 1,
+        grantedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }));
+
+      await handleCreditsConsume(
+        makeRequest({ body: { clientId: CLIENT_ID } }),
+        env, CORS,
+      );
+
+      const rec = await env.CREDITS.get(`free_credits:${CLIENT_ID}`);
+      expect(rec).toBeNull();
+    });
+
+    it('records the pool in the history entry', async () => {
+      await env.CREDITS.put(`balance:${CLIENT_ID}`, '5');
+      await env.CREDITS.put(`free_credits:${CLIENT_ID}`, JSON.stringify({
+        amount: 2,
+        grantedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }));
+
+      await handleCreditsConsume(
+        makeRequest({ body: { clientId: CLIENT_ID, reason: 'test' } }),
+        env, CORS,
+      );
+
+      const history = JSON.parse(await env.CREDITS.get(`history:${CLIENT_ID}`));
+      expect(history[0].pool).toBe('free');
+      expect(history[0].balance).toBe(6);
+      expect(history[0].delta).toBe(-1);
+      expect(history[0].reason).toBe('test');
     });
   });
 
