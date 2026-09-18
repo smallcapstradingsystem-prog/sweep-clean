@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sweeper — Consolidate Any Wallet Into USDC</title>
+    <meta name="description" content="Non-custodial cross-chain wallet sweeper. Your keys never leave your browser.">
+    <link rel="icon" href="/favicon.ico">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <nav class="nav">
+        <div class="wrap">
+            <a href="/" class="logo">◈ Sweeper</a>
+            <div class="nav-links">
+                <a href="/">Home</a>
+                <a href="/guide.html">Guide</a>
+                <button id="buy-credits-button" class="btn btn-secondary btn-sm">Buy credits</button>
+                <span id="credits-badge" class="credits-badge credits-empty">No credits</span>
+            </div>
+        </div>
+    </nav>
+
+    <main class="wrap" style="padding-top: 40px; padding-bottom: 60px;">
+        <h1 style="margin-bottom: 8px;">Launch App</h1>
+        <p class="hint" style="margin-bottom: 32px;">
+            Everything runs in your browser. No server sees your keys.
+            <strong>Dry runs are free</strong> — credits are only used on live sweeps.
+            First time here? <a href="/guide.html">Read the guide →</a>
+        </p>
+
+        <div id="free-claim-banner" class="free-claim-banner" style="display:none;"></div>
+
+        <div class="alert alert-warn">
+            <strong>Security:</strong> This tool runs entirely in your browser.
+            Your mnemonics are never sent to a server. Verify by opening your
+            browser's DevTools → Network tab — you'll see no requests carrying your keys.
+        </div>
+
+        <section class="card">
+            <h2>1. Wallet source</h2>
+            <div class="checks">
+                <label><input type="radio" name="wallet-type" value="extension" checked> Browser extension (MetaMask, Rabby, Coinbase)</label>
+                <label><input type="radio" name="wallet-type" value="walletconnect"> WalletConnect QR code (MetaMask Mobile, Rainbow, Trust)</label>
+                <label><input type="radio" name="wallet-type" value="mnemonic"> Paste mnemonic(s)</label>
+                <label><input type="radio" name="wallet-type" value="ledger"> Ledger (WebHID)</label>
+                <label><input type="radio" name="wallet-type" value="trezor"> Trezor</label>
+            </div>
+
+            <div id="wallet-extension" class="wallet-section">
+                <p class="hint" style="margin-top: 16px;">
+                    Connect with the wallet extension installed in your browser.
+                    Works with MetaMask, Rabby, Coinbase Wallet, Brave Wallet, and others.
+                </p>
+                <button id="connect-button-extension" class="btn btn-primary">Connect Browser Wallet</button>
+                <p class="hint" style="margin-top: 12px;">
+                    <strong>For multi-chain sweeps, MetaMask, Rabby, or Coinbase Wallet work best.</strong>
+                    Phantom and some other wallets only support one chain at a time, so sweeps
+                    across multiple EVM chains may skip chains that the wallet can't switch to.
+                    For the most reliable cross-chain sweep, use the mnemonic method.
+                </p>
+                <p class="hint" style="margin-top: 8px;">
+                    <strong>Note:</strong> Browser extensions support EVM chains only.
+                    Solana and Bitcoin sweeping require a mnemonic.
+                </p>
+            </div>
+
+            <div id="wallet-walletconnect" class="wallet-section" style="display:none;">
+                <p class="hint" style="margin-top: 16px;">Scan the QR with your mobile wallet, or approve in your browser extension.</p>
+                <button id="connect-button-walletconnect" class="btn btn-primary">Connect WalletConnect</button>
+                <div id="wc-qr" style="margin-top:16px;"></div>
+                <p class="hint" style="margin-top: 12px;">
+                    <strong>Note:</strong> WalletConnect supports EVM chains only.
+                    Solana and Bitcoin sweeping require a mnemonic.
+                </p>
+            </div>
+
+            <div id="wallet-mnemonic" class="wallet-section" style="display:none;">
+                <p class="hint" style="margin-top: 16px;">One mnemonic per line. BIP-39 (12 or 24 words).</p>
+                <textarea
+                    id="phrases"
+                    rows="6"
+                    autocomplete="off"
+                    autocorrect="off"
+                    autocapitalize="off"
+                    spellcheck="false"
+                    placeholder="word1 word2 word3 ...&#10;word1 word2 word3 ..."
+                ></textarea>
+                <p class="hint">Supports EVM + Solana + Bitcoin derivations from the same phrase.</p>
+            </div>
+
+            <div id="wallet-ledger" class="wallet-section" style="display:none;">
+                <p class="hint" style="margin-top: 16px;">
+                    Connect your Ledger, open the Ethereum app, then click Connect.
+                    Requires Chrome or Edge (WebHID).
+                </p>
+                <button id="connect-button-ledger" class="btn btn-primary">Connect Ledger</button>
+                <p class="hint" style="margin-top:12px;">
+                    <strong>Note:</strong> Hardware wallets currently support EVM chains only.
+                </p>
+            </div>
+
+            <div id="wallet-trezor" class="wallet-section" style="display:none;">
+                <p class="hint" style="margin-top: 16px;">
+                    Connect your Trezor, then click Connect. A Trezor popup will appear for approval.
+                </p>
+                <button id="connect-button-trezor" class="btn btn-primary">Connect Trezor</button>
+                <p class="hint" style="margin-top:12px;">
+                    <strong>Note:</strong> Hardware wallets currently support EVM chains only.
+                </p>
+            </div>
+
+            <div id="connected-banner" style="display:none; margin-top:16px; padding:12px 16px; background:rgba(35,134,54,0.1); border-left:3px solid #238636; border-radius:4px;">
+                <strong>Connected:</strong> <code id="connected-address"></code>
+            </div>
+
+            <h2 style="margin-top:32px;">2. Your destination address</h2>
+            <p class="hint">
+                Where the swept funds land — a wallet you choose. Use a different address than your sweep wallets.
+                <strong>EVM, Solana, and Bitcoin sweeps all deliver USDC to this address.</strong>
+            </p>
+
+            <div id="dest-evm-wrap" class="dest-field">
+                <label for="dest-evm" class="dest-label">Destination (receives USDC on Ethereum)</label>
+                <input id="dest-evm" type="text" placeholder="0x..." autocomplete="off" spellcheck="false">
+                <p class="hint" style="margin-top:6px; font-size: 12px;">
+                    Solana and Bitcoin sweeps are bridged to Ethereum USDC and delivered here.
+                </p>
+            </div>
+
+            <h2 style="margin-top:32px;">3. Families</h2>
+            <div class="checks">
+                <label><input type="checkbox" id="family-evm" checked> EVM (Ethereum, Arbitrum, Optimism, Base, Polygon, BNB)</label>
+                <label><input type="checkbox" id="family-solana"> Solana</label>
+                <label><input type="checkbox" id="family-bitcoin"> Bitcoin</label>
+            </div>
+
+            <div id="chain-list" style="margin-top:16px;">
+                <h3>EVM chains</h3>
+                <div class="checks">
+                    <label><input type="checkbox" value="base" checked> Base</label>
+                    <label><input type="checkbox" value="optimism" checked> Optimism</label>
+                    <label><input type="checkbox" value="arbitrum" checked> Arbitrum</label>
+                    <label><input type="checkbox" value="polygon"> Polygon</label>
+                    <label><input type="checkbox" value="bnb"> BNB Smart Chain</label>
+                    <label><input type="checkbox" value="ethereum"> Ethereum mainnet</label>
+                </div>
+            </div>
+
+            <h2 style="margin-top:32px;">4. Mode</h2>
+            <div class="checks">
+                <label><input type="radio" name="mode" value="dry-run" checked> Dry run (free, nothing broadcast)</label>
+                <label><input type="radio" name="mode" value="live"> Live (uses 1 credit, broadcasts real transactions)</label>
+            </div>
+
+            <div class="actions">
+                <button id="preview-button" class="btn btn-primary">Preview</button>
+                <button id="clear-button" class="btn btn-secondary">Clear</button>
+                <button id="run-button" class="btn btn-primary" style="display:none;">Run Dry Run</button>
+            </div>
+        </section>
+
+        <section class="card">
+            <h2>Output</h2>
+            <pre id="run-log"></pre>
+        </section>
+
+        <section class="card">
+            <h2>How it works</h2>
+            <ol style="padding-left: 24px; color: #8b949e; font-size: 14px; line-height: 1.8;">
+                <li>Pick a wallet source and provide its credentials.</li>
+                <li>Choose a destination address — a wallet you control.</li>
+                <li>Click <strong>Preview</strong> to derive addresses and see what's in each wallet.</li>
+                <li>Review the preview. Nothing has been broadcast.</li>
+                <li>Click <strong>Run</strong> to execute.</li>
+                <li>Your funds arrive at your chosen destination.</li>
+            </ol>
+            <p style="margin-top: 20px; font-size: 14px;">
+                <a href="/guide.html">Read the full guide with wallet tips and troubleshooting →</a>
+            </p>
+        </section>
+    </main>
+
+    <footer class="footer">
+        <div class="wrap">
+            <div class="footer-bottom">
+                <p>© 2026 Sweeper Labs. <a href="/">Home</a> · <a href="/guide.html">Guide</a> · <a href="/terms.html">Terms</a> · <a href="/privacy.html">Privacy</a> · <a href="/security-policy.html">Security</a></p>
+                <p style="font-size: 11px; color: #8b949e; margin-top: 12px;">
+                    Built 2026-09-18T01:18:22.707Z · bundle adf7cdb15a89fc13d89b5f70c281a419fe9029b06d94cbaae4f84892bcabd548 · 5450.6 KB
+                </p>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        window.__SWEEP_RELEASE__ = "adf7cdb15a89fc13d89b5f70c281a419fe9029b06d94cbaae4f84892bcabd548".slice(0, 12);
+    </script>
+    <script src="app.js" integrity="sha384-9FXI+nDM5uds+yGhBWiCaPagsBJyGZ7cwahFiqFnJxreBOImeFTqcKv8M/yYXBNn" crossorigin="anonymous"></script>
+</body>
+</html>
