@@ -84,7 +84,7 @@ a:hover { text-decoration: underline; }
    Adjust the height value to taste. */
 .usdc-mark {
     display: block;
-    height: 72px;
+    height: 52px;
     width: auto;
     margin: 0 auto 28px;
 }
@@ -506,7 +506,7 @@ section .lede { text-align: center; margin-bottom: 60px; }
 
 @media (max-width: 768px) {
     .hero h1 { font-size: 36px; }
-    .usdc-mark { height: 28px; margin-bottom: 22px; }
+    .usdc-mark { height: 40px; margin-bottom: 22px; }
     .lede { font-size: 17px; }
     .hero-subtag { font-size: 16px; }
     .problem .two-col { grid-template-columns: 1fr; gap: 40px; }
