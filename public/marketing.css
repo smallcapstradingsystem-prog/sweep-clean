@@ -75,9 +75,20 @@ a:hover { text-decoration: underline; }
     font-weight: 700;
     letter-spacing: -0.03em;
     line-height: 1.1;
-    margin-bottom: 24px;
+    margin-bottom: 20px;
 }
 .hero h1 .muted { color: var(--muted); }
+
+/* USDC logo, on its own line under the headline.
+   Fixed height keeps it optically balanced against the H1.
+   Adjust the height value to taste. */
+.usdc-mark {
+    display: block;
+    height: 36px;
+    width: auto;
+    margin: 0 auto 28px;
+}
+
 .lede {
     font-size: 19px;
     color: var(--muted);
@@ -495,6 +506,7 @@ section .lede { text-align: center; margin-bottom: 60px; }
 
 @media (max-width: 768px) {
     .hero h1 { font-size: 36px; }
+    .usdc-mark { height: 28px; margin-bottom: 22px; }
     .lede { font-size: 17px; }
     .hero-subtag { font-size: 16px; }
     .problem .two-col { grid-template-columns: 1fr; gap: 40px; }
