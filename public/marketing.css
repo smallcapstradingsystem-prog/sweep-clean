@@ -86,6 +86,19 @@ a:hover { text-decoration: underline; }
     line-height: 1.7;
 }
 .lede strong { color: var(--text); }
+
+/* The line directly below the hero lede. The first sentence is in
+   caps so it reads as a deliberate emphasis; the second is sentence
+   case so it doesn't feel like shouting. */
+.hero-subtag {
+    font-size: 20px;
+    line-height: 1.3;
+    color: var(--text);
+    margin: 0 0 32px;
+    letter-spacing: 0.02em;
+    font-weight: 600;
+}
+
 .cta-row {
     display: flex;
     gap: 12px;
@@ -102,17 +115,6 @@ a:hover { text-decoration: underline; }
     color: var(--muted);
 }
 
-/* The line directly below the hero headline. Slightly smaller than
-   the lede, pulled up close to the H1 so it reads as a continuation
-   of the tagline rather than a separate paragraph. */
-.hero-subtag {
-    font-size: 20px;
-    line-height: 1.3;
-    color: var(--muted);
-    margin: -12px 0 24px;
-    letter-spacing: 0.01em;
-}
-
 /* ---------- SECTIONS ---------- */
 section { padding: 80px 0; }
 section h2 {
@@ -123,6 +125,25 @@ section h2 {
     text-align: center;
 }
 section .lede { text-align: center; margin-bottom: 60px; }
+
+/* ---------- PROMO STRIP ---------- */
+.promo-strip {
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 0;
+    font-size: 14px;
+}
+.promo-strip .wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.promo-strip .promo-icon { font-size: 16px; }
+.promo-strip strong { color: var(--text); }
+.promo-strip span { color: var(--muted); }
+.promo-link { color: var(--accent); font-weight: 500; margin-left: 4px; }
 
 /* ---------- PROBLEM ---------- */
 .problem {
@@ -138,15 +159,11 @@ section .lede { text-align: center; margin-bottom: 60px; }
     margin-top: 40px;
 }
 
-/* Paragraph text in the problem section */
 .problem p {
     margin-bottom: 16px;
     color: var(--muted);
 }
 
-/* Bold headings inside the problem section render white and heavy.
-   The `.problem p strong` selector has higher specificity than
-   `.problem p`, so these headings always render bold white. */
 .problem p strong,
 .problem p > strong {
     color: var(--text);
@@ -188,7 +205,6 @@ section .lede { text-align: center; margin-bottom: 60px; }
     font-size: 15px;
 }
 
-/* Same treatment for the two lower headings */
 .problem-extra-block p strong,
 .problem-extra-block p > strong {
     color: var(--text);
@@ -228,9 +244,8 @@ section .lede { text-align: center; margin-bottom: 60px; }
 
 .no-gas .lede {
     max-width: 640px;
-    margin: 0 auto;
+    margin: 0 auto 0;
     text-align: center;
-    margin-bottom: 0;
 }
 
 .no-gas-grid {
