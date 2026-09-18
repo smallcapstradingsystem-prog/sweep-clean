@@ -28,7 +28,7 @@
         </div>
     </nav>
 
-    <section class="promo-strip">
+    <section class="promo-strip" id="promo-strip">
         <div class="wrap">
             <span class="promo-icon">🎁</span>
             <strong>Launch offer:</strong>
@@ -315,10 +315,48 @@
             <div class="footer-bottom">
                 <p>© 2026 Sweeper Labs. All rights reserved. Provided as-is, no warranty.</p>
                 <p style="font-size: 11px; margin-top: 8px;">
-                    Built 2026-09-18T01:41:19.116Z · bundle d1ca18dd0cb747e710ab4878527e24243c46ad680afa711257a4218ee03932bf · 5450.6 KB
+                    Built 2026-09-18T01:49:24.109Z · bundle d1ca18dd0cb747e710ab4878527e24243c46ad680afa711257a4218ee03932bf · 5450.6 KB
                 </p>
             </div>
         </div>
     </footer>
+
+    <script>
+      // Hide the launch-offer strip for users who have already claimed.
+      // Reads the same clientId the app uses, queries the payment
+      // worker's /credits/claim-info, and hides the strip if `claimed`
+      // is true. The subdomain is injected at build time from the same
+      // env var that src/env.js reads, so the URL can never drift from
+      // the one baked into app.js.
+      (function () {
+        var strip = document.getElementById('promo-strip');
+        if (!strip) return;
+
+        var clientId = null;
+        try { clientId = localStorage.getItem('sweep_client_id'); } catch (e) {}
+
+        // No clientId on this device means the user has never opened
+        // the app, so they haven't claimed. Leave the strip visible.
+        if (!clientId || clientId.length < 16) return;
+
+        var WORKER_URL =
+          'https://sweep-payment.smallcapstradingsystem.workers.dev/credits/claim-info';
+
+        fetch(WORKER_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clientId: clientId }),
+        })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (data) {
+            if (data && data.claimed) strip.style.display = 'none';
+          })
+          .catch(function () {
+            // Network error, worker down, CORS problem — leave the
+            // strip visible. Better to show an offer that's already
+            // been used than to hide a valid one.
+          });
+      })();
+    </script>
 </body>
 </html>

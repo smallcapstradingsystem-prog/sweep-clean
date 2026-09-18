@@ -155,6 +155,12 @@ async function main() {
     APP_JS_SIZE: size.toString(),
     APP_JS_SIZE_KB: (size / 1024).toFixed(1),
     BUILD_DATE: new Date().toISOString(),
+    // Same source as src/env.js — the esbuild `define` above and this
+    // template substitution both read the same env var, so the worker
+    // URL in the static pages can never drift from the one baked into
+    // app.js.
+    WORKER_SUBDOMAIN:
+      process.env.SWEEP_WORKER_SUBDOMAIN || "smallcapstradingsystem",
   };
 
   await renderTemplates(vars);
