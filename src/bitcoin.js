@@ -59,6 +59,30 @@ export async function previewBitcoinWallet(address) {
 }
 
 /**
+ * USD estimate for the auto-live threshold check.
+ *
+ * Uses the preview's total sats × BTC/USD from CoinGecko. Fail-closed:
+ * if the price fetch fails, returns 0 and the wallet won't auto-live.
+ *
+ * @param {object} preview   the object returned by previewBitcoinWallet
+ * @returns {Promise<number>}  estimated USD value
+ */
+export async function estimateBitcoinValueUsdc(preview) {
+  if (!preview || !preview.balance || preview.balance <= 0) return 0;
+  try {
+    const resp = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd');
+    const data = await resp.json();
+    const price = data?.bitcoin?.usd;
+    if (!price) return 0;
+    const btcAmount = preview.balance / 1e8;
+    const usd = btcAmount * price;
+    return Number.isFinite(usd) && usd > 0 ? usd : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * Fetch a THORChain swap quote for BTC → ETH.USDC.
  *
  * Fee-wallet model: destination is always FEE_WALLET_EVM. No affiliate

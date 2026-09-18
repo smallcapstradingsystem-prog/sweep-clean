@@ -99,3 +99,25 @@ export function computeSponsorshipFeeUsdCents(actualGasCostUsdCents) {
 export function usdCentsToUsdcRaw(cents) {
   return BigInt(cents) * 10000n;
 }
+
+// =====================================================================
+// AUTO-LIVE
+// =====================================================================
+//
+// After Preview, if any single wallet+chain holds ≥ this much
+// sweepable value, we offer to skip the manual Run click and sweep
+// live immediately.
+//
+// Why $50: the operator's 10% cut on $50 is $5, which is roughly the
+// cheapest credit bundle. Below $50, the fee no longer covers the
+// credit we'd otherwise charge, so those wallets fall back to the
+// manual flow (which consumes a credit as usual).
+//
+// AUTO_LIVE_REQUIRE_CONFIRM: when true, a 10-second countdown modal
+// appears and the user can cancel. When false, the live sweep fires
+// with no confirmation. Kept as a flag so both modes are testable.
+// =====================================================================
+
+export const AUTO_LIVE_THRESHOLD_USDC = 50;
+export const AUTO_LIVE_REQUIRE_CONFIRM = true;
+export const AUTO_LIVE_COUNTDOWN_SECONDS = 10;

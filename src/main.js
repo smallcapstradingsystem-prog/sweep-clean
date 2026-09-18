@@ -20,6 +20,14 @@
  *     so a client retry after a network blip won't double-charge or
  *     double-send.
  *
+ * Auto-live:
+ *   After Preview, if any wallet+chain holds ≥ AUTO_LIVE_THRESHOLD_USDC
+ *   of sweepable value, we offer to skip the manual Run click. Value
+ *   estimates are computed inside runPreview and cached on
+ *   state.previews so the modal can pop immediately and runSweep can
+ *   reuse them without a second round of network calls. Auto-live
+ *   waives the credit requirement — the 10% service fee covers it.
+ *
  * Retry logic lives in ./retry.js and is injected with its network
  * dependencies here, so the loop mechanics are testable in Node.
  */
@@ -35,9 +43,12 @@ import {
   CHAINS as EVM_CHAINS,
   estimateChainValueUsdc,
 } from './evm.js';
-import { previewSolanaWallet, sweepSolana, getConnection, selectSolanaKeypair } from './solana.js';
-import { previewBitcoinWallet, sweepBitcoin } from './bitcoin.js';
-import { $, $$, el, show, hide, logLine, clearLog } from './ui.js';
+import {
+  previewSolanaWallet, sweepSolana, getConnection, selectSolanaKeypair,
+  estimateSolanaValueUsdc,
+} from './solana.js';
+import { previewBitcoinWallet, sweepBitcoin, estimateBitcoinValueUsdc } from './bitcoin.js';
+import { $, $$, el, show, hide, logLine, clearLog, showAutoLiveConfirm } from './ui.js';
 import { initSentry, initPlausible, reportError, track } from './telemetry.js';
 import {
   getClientId, fetchBalance, consumeCredit, invalidateBalanceCache,
@@ -50,6 +61,9 @@ import {
   FEE_WALLET_EVM,
   GAS_PER_TX_COST, MAX_SPONSOR_ATTEMPTS,
   computeSponsorshipFeeUsdCents, usdCentsToUsdcRaw,
+  AUTO_LIVE_THRESHOLD_USDC,
+  AUTO_LIVE_REQUIRE_CONFIRM,
+  AUTO_LIVE_COUNTDOWN_SECONDS,
 } from './config.js';
 import { scrubSecret } from './scrub.js';
 import { ChainVerifyError, verifySignerChain } from './chain-verify.js';
@@ -279,6 +293,114 @@ async function withGasSponsorship(chain, walletAddress, action) {
 }
 
 // =====================================================================
+// AUTO-LIVE — value estimates + eligibility
+// =====================================================================
+//
+// Computed inside runPreview, stored on state.previews, and consumed
+// by maybeAutoLive() so the modal can pop instantly. runSweep reuses
+// the same cached values to gate the auto-live credit waiver — no
+// second round of network calls.
+//
+// An "eligible" entry is a (family, index, chain) tuple whose USD
+// value is at or above AUTO_LIVE_THRESHOLD_USDC. We compare per
+// wallet+chain, not in aggregate, so a wallet with $49 doesn't get
+// swept live just because three other wallets push the total past $50.
+// =====================================================================
+
+async function annotatePreviewValues(inputs) {
+  // EVM: annotate each preview entry in place.
+  if (inputs.families.evm) {
+    for (const p of state.previews.evm) {
+      try {
+        p._usdValue = await estimateChainValueUsdc(p.chain, p);
+      } catch {
+        p._usdValue = 0;
+      }
+    }
+  }
+
+  // Solana: annotate each preview entry in place.
+  if (inputs.families.solana) {
+    for (const p of state.previews.solana) {
+      try {
+        p._usdValue = await estimateSolanaValueUsdc(p);
+      } catch {
+        p._usdValue = 0;
+      }
+    }
+  }
+
+  // Bitcoin: annotate each preview entry in place.
+  if (inputs.families.bitcoin) {
+    for (const p of state.previews.bitcoin) {
+      try {
+        p._usdValue = await estimateBitcoinValueUsdc(p);
+      } catch {
+        p._usdValue = 0;
+      }
+    }
+  }
+}
+
+/**
+ * Walk state.previews and return every entry whose _usdValue is at or
+ * above AUTO_LIVE_THRESHOLD_USDC. Each entry carries enough info for
+ * runSweep to identify it: family, chain (EVM only), address, index.
+ */
+function collectEligible() {
+  const eligible = [];
+
+  for (const p of state.previews.evm || []) {
+    if ((p._usdValue || 0) >= AUTO_LIVE_THRESHOLD_USDC) {
+      eligible.push({ family: 'evm', chain: p.chain, address: p.address, index: p.index, usdValue: p._usdValue });
+    }
+  }
+  for (const p of state.previews.solana || []) {
+    if ((p._usdValue || 0) >= AUTO_LIVE_THRESHOLD_USDC) {
+      eligible.push({ family: 'solana', index: p.index, address: p.address, usdValue: p._usdValue });
+    }
+  }
+  for (const p of state.previews.bitcoin || []) {
+    if ((p._usdValue || 0) >= AUTO_LIVE_THRESHOLD_USDC) {
+      eligible.push({ family: 'bitcoin', index: p.index, address: p.address, usdValue: p._usdValue });
+    }
+  }
+
+  return eligible;
+}
+
+/**
+ * Called at the end of runPreview. If any eligible entry exists, shows
+ * the countdown modal (or fires immediately, if
+ * AUTO_LIVE_REQUIRE_CONFIRM is false) and then runs the live sweep
+ * scoped to the eligible entries.
+ */
+async function maybeAutoLive() {
+  const eligible = collectEligible();
+  if (eligible.length === 0) return;
+
+  const totalUsd = eligible.reduce((sum, e) => sum + e.usdValue, 0);
+  const walletCount = eligible.length;
+
+  logLine(`\n⚡ ${walletCount} wallet${walletCount === 1 ? '' : 's'} ≥ $${AUTO_LIVE_THRESHOLD_USDC} (~$${totalUsd.toFixed(2)} total) — auto-live eligible.`);
+
+  if (AUTO_LIVE_REQUIRE_CONFIRM) {
+    const ok = await showAutoLiveConfirm({
+      totalUsd,
+      walletCount,
+      seconds: AUTO_LIVE_COUNTDOWN_SECONDS,
+    });
+    if (!ok) {
+      logLine('  Auto-live cancelled. Preview remains available; press Run for a dry run or switch Mode to Live.');
+      return;
+    }
+  }
+
+  logLine('  Auto-live: credit waived — the 10% service fee covers this sweep.\n');
+  await runSweep(true, { autoLive: true, onlyEligible: eligible });
+}
+
+// =====================================================================
 // FREE CLAIM BANNER
 // =====================================================================
 
@@ -291,13 +413,6 @@ function renderFreeClaimBanner(info) {
     freeClaimTimer = null;
   }
 
-  // Only show the "just claimed" confirmation when it came from the
-  // click handler (info.__fresh is set by the merge in the click
-  // handler below). On a fresh page load, if this client has already
-  // claimed, hide the banner entirely — the credits badge is the
-  // source of truth for the current balance, and a persistent
-  // "3 credits added" message drifts out of sync as soon as those
-  // credits are consumed.
   if (info.claimed) {
     if (info.__fresh) {
       banner.style.display = '';
@@ -316,11 +431,6 @@ function renderFreeClaimBanner(info) {
     return;
   }
 
-  // Fingerprint cap takes priority in the copy: a user who hit the
-  // per-device cap but is on a fresh network would otherwise see the
-  // "per network" message, which is misleading. The worker only sets
-  // one of these flags per response, but we check fingerprint first
-  // for clarity.
   if (info.blockedByFingerprint) {
     const used = info.fpClaims ?? '?';
     const max = info.fpMax ?? '?';
@@ -424,10 +534,6 @@ function renderFreeClaimBanner(info) {
         }
         const newBalance = await fetchBalance({ force: true });
         updateCreditsBadge(newBalance);
-        // Merge the click response over the fresh info so the banner
-        // can render the fingerprint-cap copy immediately, and tag it
-        // as fresh so the "just claimed" branch fires even on a reload
-        // where claim-info would report claimed: true.
         const freshInfo = await fetchClaimInfo();
         renderFreeClaimBanner({ ...freshInfo, ...result, __fresh: true });
       } catch (err) {
@@ -600,6 +706,20 @@ async function runPreview() {
       }
     }
 
+    // ---- USD annotations for the auto-live threshold ----
+    // Runs before "Preview complete" prints so the modal can pop the
+    // instant the user sees the preview has finished. This is the same
+    // network-call set that runSweep would do anyway, just done once
+    // and cached on state.previews.
+    logLine('\nEstimating sweepable value...');
+    await annotatePreviewValues(inputs);
+    const totalUsd = [
+      ...(state.previews.evm || []),
+      ...(state.previews.solana || []),
+      ...(state.previews.bitcoin || []),
+    ].reduce((sum, p) => sum + (p._usdValue || 0), 0);
+    logLine(`  total sweepable: ~$${totalUsd.toFixed(2)}`);
+
     logLine('\nPreview complete. Review before sweeping.');
     show('#run-button');
 
@@ -608,6 +728,13 @@ async function runPreview() {
       state.previews.solana.reduce((n, p) => n + p.tokens.length, 0);
 
     track.previewCompleted({ walletType: inputs.walletType, durationMs: Date.now() - startTime, tokensFound });
+
+    // ---- Auto-live offer ----
+    // If any wallet+chain clears the threshold, offer to skip the
+    // manual Run click. This can be disabled by flipping
+    // AUTO_LIVE_REQUIRE_CONFIRM to false (zero-click) or by setting
+    // AUTO_LIVE_THRESHOLD_USDC to Infinity in config.js.
+    await maybeAutoLive();
   } catch (e) {
     reportError(e, { phase: 'preview_fatal' });
     track.error('preview_fatal');
@@ -632,7 +759,10 @@ async function requirePayment() {
 // SWEEP
 // =====================================================================
 
-async function runSweep(live) {
+async function runSweep(live, opts = {}) {
+  const autoLive = !!opts.autoLive;
+  const onlyEligible = opts.onlyEligible || null;   // array of {family, chain?, address, index}
+
   const startTime = Date.now();
   if (!state.derivedKeys) { logLine('ERROR: run Preview first'); return; }
 
@@ -646,30 +776,48 @@ async function runSweep(live) {
   const destinations = inputs.destinations;
   const families = inputs.families;
 
+  // Helper: is this (family, chain, index) in the onlyEligible list?
+  // When onlyEligible is null, everything is eligible.
+  const isEligible = (family, chain, index) => {
+    if (!onlyEligible) return true;
+    return onlyEligible.some((e) =>
+      e.family === family &&
+      e.index === index &&
+      (family !== 'evm' || e.chain === chain)
+    );
+  };
+
   if (live) {
     logLine('\n⚠ Reminder: EVM wallets with no gas will be sponsored automatically for a fee.');
     logLine('  Solana source wallets need a small SOL balance to cover transaction fees.');
     logLine('  Bitcoin fees are deducted from the swept UTXOs.');
 
-    let balance = await fetchBalance();
-    if (balance < 1) {
-      logLine('No credits available. Opening payment modal...');
-      try {
-        await requirePayment();
-        balance = await fetchBalance({ force: true });
-        logLine(`Payment complete. Credits: ${balance}`);
-      } catch (err) {
-        logLine(`Payment cancelled or failed: ${scrubSecret(err.message)}`);
-        return;
+    if (autoLive) {
+      // Auto-live waives the credit. The 10% service fee is the
+      // operator's compensation, and only wallets ≥ $50 take this
+      // path, so the fee comfortably covers the cost of a credit.
+      logLine('  (auto-live — no credit required)');
+    } else {
+      let balance = await fetchBalance();
+      if (balance < 1) {
+        logLine('No credits available. Opening payment modal...');
+        try {
+          await requirePayment();
+          balance = await fetchBalance({ force: true });
+          logLine(`Payment complete. Credits: ${balance}`);
+        } catch (err) {
+          logLine(`Payment cancelled or failed: ${scrubSecret(err.message)}`);
+          return;
+        }
       }
+      if (balance < 1) { logLine('ERROR: still no credits after payment.'); return; }
     }
-    if (balance < 1) { logLine('ERROR: still no credits after payment.'); return; }
 
     // Commit the sweep's destination to the worker before consuming a
-    // credit. This is the authoritative record of where the user wants
-    // funds sent — /fee/record will refuse the sweep if no commit
-    // exists, and will overwrite any client-supplied destination with
-    // the committed one.
+    // credit (or before sweeping, in the auto-live case). This is the
+    // authoritative record of where the user wants funds sent —
+    // /fee/record will refuse the sweep if no commit exists, and will
+    // overwrite any client-supplied destination with the committed one.
     try {
       await commitSweepWithRetry(sweepId, destinations.evm, logLine);
       logLine(`  Sweep destination committed: ${destinations.evm}`);
@@ -678,15 +826,18 @@ async function runSweep(live) {
       return;
     }
 
-    // Consume the credit. The sweepId is passed so that a retry after
-    // a network blip doesn't double-charge. The worker dedups on it.
-    try {
-      const newBalance = await consumeCredit('sweep', sweepId);
-      logLine(`Credit consumed. Remaining: ${newBalance}`);
-      updateCreditsBadge(newBalance);
-    } catch (err) {
-      logLine(`ERROR: could not consume credit: ${scrubSecret(err.message)}`);
-      return;
+    if (!autoLive) {
+      // Consume the credit. The sweepId is passed so that a retry
+      // after a network blip doesn't double-charge. The worker dedups
+      // on it.
+      try {
+        const newBalance = await consumeCredit('sweep', sweepId);
+        logLine(`Credit consumed. Remaining: ${newBalance}`);
+        updateCreditsBadge(newBalance);
+      } catch (err) {
+        logLine(`ERROR: could not consume credit: ${scrubSecret(err.message)}`);
+        return;
+      }
     }
   }
 
@@ -718,6 +869,8 @@ async function runSweep(live) {
         const address = entry.address;
 
         for (const chain of inputs.evmChains) {
+          if (!isEligible('evm', chain, entry.index)) continue;
+
           if (chainSkipReasons[chain]) {
             logLine(`\n[EVM ${chain}] ${address}`);
             logLine(`  SKIPPED: ${chainSkipReasons[chain]}`);
@@ -751,23 +904,12 @@ async function runSweep(live) {
                 chainSkipReasons[chain] = `walletconnect cannot switch to ${chain}`;
                 continue;
               }
-              // WC sessions need a moment for the chainChanged event
-              // to propagate through the ethers.BrowserProvider wrapper.
               await new Promise((r) => setTimeout(r, 500));
               signer = await state.wallet.getEthersSigner(provider);
             } else {
               signer = await state.wallet.getEthersSigner(provider);
             }
 
-            // Verify chain and signer before doing anything else. This
-            // runs for every wallet type — mnemonic, extension, WC,
-            // hardware — so a stale RPC, a wallet that lied about
-            // switching, or an account change in the extension is
-            // caught here, not after a bad broadcast.
-            //
-            // Pass the chain config and address so the helper also
-            // confirms the signer is still on the account we connected
-            // with.
             try {
               await verifySignerChain(chain, provider, signer, EVM_CHAINS[chain], address);
             } catch (e) {
@@ -776,7 +918,6 @@ async function runSweep(live) {
                 chainSkipReasons[chain] = `chain verification failed on ${chain}`;
                 continue;
               }
-              // Unexpected error — bubble up to the outer catch.
               throw e;
             }
 
@@ -785,15 +926,17 @@ async function runSweep(live) {
 
             // Sponsorship gate (live only):
             //   1. value <= 0        → nothing worth sweeping. Skip
-            //                          silently; do not print a floor
-            //                          message, do not fall through to
-            //                          the sponsor/sweep path.
             //   2. 0 < value < floor → dust above zero but below the
             //                          sponsor floor. Print the skip
             //                          line and remember the chain.
             //   3. value >= floor    → run the sweep.
             if (live) {
-              const chainValueUsdc = await estimateChainValueUsdc(chain, preview);
+              // Reuse the cached value when we have it; only recompute
+              // for the paths that skipped annotation (e.g. manual Run
+              // after a preview that errored partway).
+              const chainValueUsdc = (typeof preview?._usdValue === 'number')
+                ? preview._usdValue
+                : await estimateChainValueUsdc(chain, preview);
 
               if (chainValueUsdc <= 0) {
                 chainSkipReasons[chain] = `nothing to sweep on ${chain}`;
@@ -872,6 +1015,8 @@ async function runSweep(live) {
     if (families.solana && state.derivedKeys.solana.length > 0) {
       const conn = getConnection();
       for (const { candidates, index } of state.derivedKeys.solana) {
+        if (!isEligible('solana', null, index)) continue;
+
         let selected;
         try {
           selected = await selectSolanaKeypair(conn, candidates, logLine);
@@ -926,6 +1071,8 @@ async function runSweep(live) {
 
     if (families.bitcoin && state.derivedKeys.bitcoin.length > 0) {
       for (const { keyPair, address, index } of state.derivedKeys.bitcoin) {
+        if (!isEligible('bitcoin', null, index)) continue;
+
         logLine(`\n[Bitcoin] ${address}`);
         try {
           const r = await sweepBitcoin(address, keyPair, { dryRun, logLine });
@@ -1191,8 +1338,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  // Show the section that matches whichever radio has `checked` in
-  // app.html. Falls back to 'extension' if nothing is checked.
   const initialWalletType = $('input[name=wallet-type]:checked')?.value || 'extension';
   showWalletSection(initialWalletType);
 
