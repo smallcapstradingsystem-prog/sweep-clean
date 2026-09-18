@@ -13,6 +13,8 @@
  *     transient error can't double-count.
  */
 
+import { scrubSecret } from './scrub.js';
+
 // =====================================================================
 // CONFIG
 // =====================================================================
@@ -34,36 +36,21 @@ export const COMMIT_BACKOFF_MS = 1000;
 
 export function isRetryableFeeError(err) {
   const msg = String(err?.message || err || '').toLowerCase();
-  // HTTP status in the message (from credits.js throw sites)
   const statusMatch = msg.match(/http (\d{3})/);
   if (statusMatch) {
     const status = parseInt(statusMatch[1], 10);
     if (status >= 400 && status < 500 && status !== 429) return false;
     return true;
   }
-  // Client-side validation errors from the worker ("receipts required",
-  // etc.) are not transient.
   if (msg.includes('receipts required')) return false;
   if (msg.includes('receipt[')) return false;
   if (msg.includes('sweepid required')) return false;
   if (msg.includes('clientid required')) return false;
   if (msg.includes('not committed')) return false;
   if (msg.includes('different client')) return false;
-  // Anything else (fetch errors, timeouts, 5xx) is treated as retryable.
   return true;
 }
 
-/**
- * @param {object}   args
- * @param {Function} args.recordFn  - async (payload) => result
- * @param {object}   args.payload   - passed through to recordFn
- * @param {Function} [args.logLine] - (msg) => void, optional
- * @param {object}   [args.config]  - { maxAttempts, backoffMs } — defaults
- *                                    to FEE_RECORD_* constants. Override
- *                                    for tests.
- * @param {Function} [args.sleep]   - async (ms) => void — defaults to
- *                                    setTimeout. Override for tests.
- */
 export async function recordFeeWithRetry({
   recordFn,
   payload,
@@ -88,18 +75,18 @@ export async function recordFeeWithRetry({
       lastError = e;
 
       if (!isRetryableFeeError(e)) {
-        if (logLine) logLine(`  Fee record rejected (not retryable): ${e.message}`);
+        if (logLine) logLine(`  Fee record rejected (not retryable): ${scrubSecret(e.message)}`);
         throw e;
       }
 
       if (attempt === maxAttempts) {
-        if (logLine) logLine(`  Fee record failed after ${maxAttempts} attempts: ${e.message}`);
+        if (logLine) logLine(`  Fee record failed after ${maxAttempts} attempts: ${scrubSecret(e.message)}`);
         throw e;
       }
 
       const backoff = backoffMs[attempt - 1] ?? backoffMs[backoffMs.length - 1] ?? 3000;
       if (logLine) {
-        logLine(`  Fee record attempt ${attempt}/${maxAttempts} failed (${e.message}); retrying in ${backoff}ms`);
+        logLine(`  Fee record attempt ${attempt}/${maxAttempts} failed (${scrubSecret(e.message)}); retrying in ${backoff}ms`);
       }
       await sleep(backoff);
     }
@@ -117,15 +104,6 @@ export async function recordFeeWithRetry({
 // permanent and bail immediately.
 // =====================================================================
 
-/**
- * @param {object}   args
- * @param {Function} args.commitFn        - async (sweepId, dest) => result
- * @param {string}   args.sweepId
- * @param {string}   args.userDestination
- * @param {Function} [args.logLine]
- * @param {object}   [args.config]        - { maxAttempts, backoffMs }
- * @param {Function} [args.sleep]
- */
 export async function commitSweepWithRetry({
   commitFn,
   sweepId,
@@ -152,7 +130,6 @@ export async function commitSweepWithRetry({
         const status = parseInt(statusMatch[1], 10);
         if (status >= 400 && status < 500 && status !== 429) throw e;
       }
-      // Worker-side validation errors are permanent too.
       if (
         msg.includes('clientid required') ||
         msg.includes('sweepid required') ||
@@ -168,7 +145,7 @@ export async function commitSweepWithRetry({
         : (backoffMs[attempt - 1] ?? 1000);
 
       if (logLine) {
-        logLine(`  Commit attempt ${attempt}/${maxAttempts} failed (${e.message}); retrying...`);
+        logLine(`  Commit attempt ${attempt}/${maxAttempts} failed (${scrubSecret(e.message)}); retrying...`);
       }
       await sleep(backoff);
     }
@@ -180,24 +157,7 @@ export async function commitSweepWithRetry({
 // =====================================================================
 // GAS SPONSORSHIP
 // =====================================================================
-//
-// The wrapper retries the *sweep action* when it fails with an
-// insufficient-gas error, re-requesting sponsorship each time. The
-// underlying sponsor call is idempotent on (chain, address), so
-// repeated requests within the TTL are safe.
-// =====================================================================
 
-/**
- * @param {object}   args
- * @param {Function} args.sponsorFn       - async (chain, addr, shortfallWei) => { ok, sent, txHash, error }
- * @param {Function} args.getBalance      - async (addr) => bigint
- * @param {Function} args.parseEther      - (str) => bigint (usually ethers.parseEther)
- * @param {Function} args.formatEther     - (bigint) => str (usually ethers.formatEther)
- * @param {string}   args.chain
- * @param {string}   args.walletAddress
- * @param {object}   args.perTxCost       - GAS_PER_TX_COST map; perTxCost[chain] is a decimal string
- * @param {Function} [args.logLine]
- */
 export async function ensureWalletGasOnce({
   sponsorFn,
   getBalance,
@@ -236,14 +196,6 @@ export async function ensureWalletGasOnce({
   }
 }
 
-/**
- * @param {object}   args
- * @param {Function} args.ensureGas  - async () => { ok, reason, sponsoredWei }
- * @param {Function} args.action     - async () => result
- * @param {number}   args.maxAttempts
- * @param {Function} [args.logLine]
- * @param {Function} [args.sleep]
- */
 export async function withGasSponsorship({
   ensureGas,
   action,
@@ -284,5 +236,5 @@ export async function withGasSponsorship({
     }
   }
 
-  throw new Error(`Exhausted ${maxAttempts} sponsorship attempts: ${lastError?.message}`);
+  throw new Error(`Exhausted ${maxAttempts} sponsorship attempts: ${scrubSecret(lastError?.message)}`);
 }

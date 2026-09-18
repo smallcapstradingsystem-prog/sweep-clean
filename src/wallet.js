@@ -3,7 +3,7 @@
  */
 
 import { ethers } from 'ethers';
-import { deriveEvm, deriveSolana, deriveBitcoin } from './derive.js';
+import { deriveEvm } from './derive.js';
 
 // =====================================================================
 // HELPERS
@@ -31,13 +31,17 @@ function normalizeV(rawV) {
 // =====================================================================
 // MNEMONIC BACKEND
 // =====================================================================
+//
+// EVM-only. Solana and Bitcoin derivation happens in main.js via
+// deriveAll(), which supports multiple candidate paths and picks the
+// right one based on on-chain activity. This backend does not expose
+// Solana or Bitcoin keypairs — see main.js for those flows.
+// =====================================================================
 
 export class MnemonicWallet {
   constructor(phrase) {
     this.phrase = phrase;
     this._evm = null;
-    this._solana = null;
-    this._bitcoin = null;
   }
 
   async getAddress() {
@@ -50,42 +54,20 @@ export class MnemonicWallet {
     return this._evm.wallet.connect(provider);
   }
 
-  getSolanaKeypair() {
-    if (!this._solana) this._solana = deriveSolana(this.phrase);
-    return this._solana.keypair;
-  }
-
-  getBitcoinKeyPair() {
-    if (!this._bitcoin) this._bitcoin = deriveBitcoin(this.phrase);
-    return this._bitcoin.keyPair;
-  }
-
   async dispose() {
     this.phrase = null;
     this._evm = null;
-    this._solana = null;
-    this._bitcoin = null;
   }
 }
 
 // =====================================================================
-// BROWSER EXTENSION BACKEND (MetaMask, Rabby, Coinbase, etc.)
-// =====================================================================
-//
-// Uses the injected `window.ethereum` provider. Works with any wallet
-// that follows the EIP-1193 standard: MetaMask, Rabby, Coinbase Wallet,
-// Brave Wallet, Frame, etc.
-//
-// Limitations:
-//   - EVM chains only (Solana/Bitcoin still require a mnemonic)
-//   - The user must approve every transaction in the extension popup
-//   - If the extension is on the wrong chain, we ask it to switch
+// BROWSER EXTENSION BACKEND
 // =====================================================================
 
 export class BrowserExtensionBackend {
   constructor(ethersProvider, rawProvider, address, chainId) {
-    this.provider = ethersProvider;      // ethers.BrowserProvider wrapping window.ethereum
-    this.rawProvider = rawProvider;      // the raw EIP-1193 provider (window.ethereum)
+    this.provider = ethersProvider;
+    this.rawProvider = rawProvider;
     this.address = address;
     this.chainId = chainId;
   }
@@ -94,24 +76,10 @@ export class BrowserExtensionBackend {
     return this.address;
   }
 
-  /**
-   * Return a signer for the requested chain.
-   *
-   * The `_provider` argument (the target chain's JsonRpcProvider) is
-   * deliberately ignored: browser extensions sign through their own
-   * provider, which is a live wrapper that always reflects the wallet's
-   * current chain. We just need to make sure the wallet is on the right
-   * chain before calling this (see `switchChain`).
-   */
   async getEthersSigner(_provider) {
     return this.provider.getSigner();
   }
 
-  /**
-   * Read the wallet's *current* chain id, straight from the injected
-   * provider — not from the cached `this.chainId`, which can be stale
-   * if the user switched networks in the extension between calls.
-   */
   async getChainId() {
     const hex = await this.rawProvider.request({ method: 'eth_chainId' });
     const parsed = parseInt(hex, 16);
@@ -130,21 +98,9 @@ export class BrowserExtensionBackend {
     throw new Error('Browser extensions do not support Bitcoin in this build');
   }
 
-  /**
-   * Ask the extension to switch to a specific chain.
-   * Called by the sweep code before each chain's transactions.
-   *
-   * The second argument is accepted for signature parity with
-   * WalletConnectBackend.switchChain but is unused — extensions
-   * already know every chain they support.
-   */
   async switchChain(chainId, _extra = {}) {
     const target = Number(chainId);
 
-    // If we can determine the current chain and it already matches,
-    // short-circuit. If we can't determine it, fall through and attempt
-    // the switch anyway — wallet_switchEthereumChain is idempotent, and
-    // assuming a stale cached value could skip a needed switch.
     try {
       const current = await this.getChainId();
       if (current === target) return true;
@@ -158,11 +114,9 @@ export class BrowserExtensionBackend {
         method: 'wallet_switchEthereumChain',
         params: [{ chainId: hex }],
       });
-      // Re-read after the switch — some wallets lie about success.
       await this.getChainId();
       return true;
     } catch (e) {
-      // 4902 = chain not added to the wallet
       if (e.code === 4902 || (e.message && e.message.includes('Unrecognized chain ID'))) {
         throw new Error(`Wallet does not have chain ${chainId} configured. Add it to the wallet and try again.`);
       }
@@ -171,8 +125,7 @@ export class BrowserExtensionBackend {
   }
 
   async dispose() {
-    // Browser extensions don't have a "disconnect" concept — the user
-    // just closes the popup or revokes the site's access manually.
+    // Browser extensions don't have a "disconnect" concept.
   }
 }
 
@@ -185,26 +138,20 @@ export async function connectBrowserExtension() {
 
   const raw = window.ethereum;
 
-  // Handle multiple providers (e.g. both MetaMask and Coinbase installed).
-  // EIP-6963 wallets announce themselves via `providers`; we prefer MetaMask.
-  // If `providers` is missing or empty, use the raw provider directly.
   let target = raw;
   if (Array.isArray(raw.providers) && raw.providers.length > 0) {
     target = raw.providers.find((p) => p.isMetaMask) || raw.providers[0];
   }
 
-  // Request accounts — this triggers the popup
   const accounts = await target.request({ method: 'eth_requestAccounts' });
   if (!accounts || accounts.length === 0) {
     throw new Error('No accounts returned by the browser wallet');
   }
   const address = accounts[0];
 
-  // Read current chain
   const chainIdHex = await target.request({ method: 'eth_chainId' });
   const chainId = parseInt(chainIdHex, 16);
 
-  // Wrap in ethers
   const ethersProvider = new ethers.BrowserProvider(target);
 
   return new BrowserExtensionBackend(ethersProvider, target, address, chainId);
@@ -216,8 +163,8 @@ export async function connectBrowserExtension() {
 
 export class WalletConnectBackend {
   constructor(wcProvider, ethersProvider, address, chainId) {
-    this.wcProvider = wcProvider;        // raw @walletconnect/ethereum-provider instance
-    this.provider = ethersProvider;      // ethers.BrowserProvider wrapping wcProvider
+    this.wcProvider = wcProvider;
+    this.provider = ethersProvider;
     this.address = address;
     this.chainId = chainId;
   }
@@ -230,12 +177,6 @@ export class WalletConnectBackend {
     return this.provider.getSigner();
   }
 
-  /**
-   * Read the session's *current* chain id, straight from the
-   * WalletConnect provider. The cached `this.chainId` is only a hint —
-   * the user can switch chains in their mobile wallet at any time, and
-   * the session's reported chain updates asynchronously.
-   */
   async getChainId() {
     const cid = this.wcProvider.chainId;
     if (typeof cid === 'number' && cid > 0) {
@@ -259,23 +200,9 @@ export class WalletConnectBackend {
     throw new Error('WalletConnect does not support Bitcoin in this build');
   }
 
-  /**
-   * Ask the WC session to switch to a specific chain.
-   *
-   * WalletConnect relays the request to the mobile wallet, which may
-   * prompt the user or switch silently depending on the app. If the
-   * chain isn't in the session's approved list, the wallet may reject.
-   *
-   * @param {number} chainId - the EIP-155 chain id to switch to
-   * @param {object} [extra]  - optional `{ rpcUrls, chainName, nativeCurrency, blockExplorerUrls }`
-   *                            to offer the wallet when it doesn't know the chain
-   */
   async switchChain(chainId, extra = {}) {
     const target = Number(chainId);
 
-    // If we can determine the current chain and it already matches,
-    // short-circuit. If we can't determine it, fall through and attempt
-    // the switch anyway — wallet_switchEthereumChain is idempotent.
     try {
       const current = await this.getChainId();
       if (current === target) return true;
@@ -289,7 +216,6 @@ export class WalletConnectBackend {
         method: 'wallet_switchEthereumChain',
         params: [{ chainId: hex }],
       });
-      // Re-read after the switch.
       await this.getChainId();
       return true;
     } catch (e) {
@@ -301,8 +227,6 @@ export class WalletConnectBackend {
         (msg.includes('chainId') && msg.includes('not') && msg.includes('added'));
 
       if (isMissingChain && extra.rpcUrls) {
-        // Ask the wallet to add the chain, then we're done — WC wallets
-        // switch automatically after a successful add.
         try {
           await this.wcProvider.request({
             method: 'wallet_addEthereumChain',
@@ -429,7 +353,6 @@ export class LedgerBackend {
 
         const sig = await ethApp.signTransaction(path, unsignedHex);
 
-        // Normalize `v` to yParity (0 or 1) for ethers v6.
         const v = normalizeV(sig.v);
 
         unsignedTx.signature = ethers.Signature.from({
@@ -618,7 +541,7 @@ export async function connectTrezor({ derivationPath = "m/44'/60'/0'/0/0" } = {}
   await TrezorConnect.init({
     lazyLoad: true,
     manifest: {
-      email: 'hello@example.com',
+      email: 'support@sweeper.cloud',
       appUrl: window.location.origin,
     },
   });

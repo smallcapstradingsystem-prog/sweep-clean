@@ -24,34 +24,26 @@
  *   CRYPTO_ADDRESS_EVM       — 0x... receiving address (all EVM chains)
  *   CRYPTO_ADDRESS_SOL       — base58 receiving address on Solana
  *   CRYPTO_ADDRESS_BTC       — bc1q... receiving address on Bitcoin
+ *   CRYPTO_ADDRESS_TRON      — T... receiving address on TRON (USDT-TRC20)
  *   ETHERSCAN_API_KEY        — unified Etherscan V2 key
- *   HELIUS_API_KEY
+ *   HELIUS_API_KEY           — Solana transaction indexer
+ *   TRONGRID_API_KEY         — TronGrid API key for TRC20 transfer scanning
  *   GAS_SPONSOR_KEY          — EVM gas sponsor wallet. Accepts EITHER:
  *                              - a 0x-prefixed 64-char hex private key, OR
  *                              - a BIP-39 mnemonic (12/15/18/21/24 words)
- *                              The wallet address is derived at runtime.
  *   OPERATOR_SECRET          — password for /fee/* and /admin/* endpoints.
- *                              Must be strong (32+ random bytes) since there
- *                              is no Cloudflare Access layer in front of the
- *                              operator dashboard.
+ *
+ * Optional secrets:
+ *   ALLOWED_ORIGINS          — comma-separated list of origins for CORS.
+ *                              If unset, CORS falls back to '*'. Set this
+ *                              in production to lock the worker to your
+ *                              own domains.
  *
  * KV namespaces:
  *   CREDITS             — paid balances, free-credit pool, history, free-claim
  *                         state, rate limits, fee records, sweep commits,
  *                         idempotency keys, admin rate limits, client metadata
  *   PENDING_PAYMENTS    — crypto payment records
- *
- * Free-credit model:
- *   The launch bonus grants 2 free credits with two 24h clocks: 24h to
- *   claim, then 24h to use. Free credits live in their own record
- *   (`free_credits:{clientId}`) with an `expiresAt` field and a KV TTL
- *   one minute longer. They are consumed before paid credits.
- *
- * Receipt families:
- *   evm, solana, bitcoin, tron. The tron family carries TRC-20 USDT
- *   sweeps bridged to USDC on Ethereum via deBridge. Its receipts use
- *   the same shape as solana (txids + orderIds), just with a different
- *   sourceChain string.
  */
 
 import { ethers } from 'ethers';
@@ -61,11 +53,11 @@ import { ethers } from 'ethers';
 // =====================================================================
 
 const BUNDLES = {
-  'single':    { credits: 1,  priceCents: 500 },
-  'pack-5':    { credits: 5,  priceCents: 2250 },
-  'pack-10':   { credits: 10, priceCents: 4000 },
-  'pack-25':   { credits: 25, priceCents: 8000 },
-  'pack-50':   { credits: 50, priceCents: 15000 },
+  'single':    { credits: 1,  priceCents: 1000 },  // $10.00
+  'pack-5':    { credits: 5,  priceCents: 2000 },  // $20.00
+  'pack-10':   { credits: 10, priceCents: 4000 },  // $40.00
+  'pack-25':   { credits: 25, priceCents: 8000 },  // $80.00
+  'pack-50':   { credits: 50, priceCents: 15000 }, // $150.00
 };
 
 const CHAIN_IDS = {
@@ -97,6 +89,9 @@ const TOKEN_ADDRESSES = {
     USDC: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
     USDT: '0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9',
   },
+  tron: {
+    USDT: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',
+  },
 };
 
 const METHODS = {
@@ -112,6 +107,7 @@ const METHODS = {
   'usdt-polygon':  { chain: 'polygon',  token: 'USDT', decimals: 6,  envAddress: 'CRYPTO_ADDRESS_EVM' },
   'usdt-bnb':      { chain: 'bnb',      token: 'USDT', decimals: 18, envAddress: 'CRYPTO_ADDRESS_EVM' },
   'usdt-ethereum': { chain: 'ethereum', token: 'USDT', decimals: 6,  envAddress: 'CRYPTO_ADDRESS_EVM' },
+  'usdt-tron':     { chain: 'tron',     token: 'USDT', decimals: 6,  envAddress: 'CRYPTO_ADDRESS_TRON' },
   'eth-base':      { chain: 'base',     token: 'ETH',  decimals: 18, envAddress: 'CRYPTO_ADDRESS_EVM' },
   'sol':           { chain: 'solana',   token: 'SOL',  decimals: 9,  envAddress: 'CRYPTO_ADDRESS_SOL' },
   'btc':           { chain: 'bitcoin',  token: 'BTC',  decimals: 8,  envAddress: 'CRYPTO_ADDRESS_BTC' },
@@ -127,12 +123,8 @@ const SPONSOR_RPC = {
 };
 
 const SPONSOR_TARGET_WEI = {
-  ethereum: '0.0008',
-  arbitrum: '0.00002',
-  optimism: '0.00002',
-  base:     '0.00002',
-  polygon:  '0.01',
-  bnb:      '0.0002',
+  ethereum: '0.0008', arbitrum: '0.00002', optimism: '0.00002',
+  base: '0.00002', polygon: '0.01', bnb: '0.0002',
 };
 
 const SPONSOR_MAX_WEI = {
@@ -145,6 +137,21 @@ const SPONSOR_RATE_WINDOW_MS = 10 * 60 * 1000;
 const SPONSOR_IDEM_TTL = 60 * 5;
 const CONSUME_IDEM_TTL = 60 * 60 * 24 * 30;
 const CRYPTO_VERIFY_LOCK_TTL = 30;
+
+// Bug 7: pending payment TTL raised to 90 min so a payment made at
+// minute 29 of the client's 30-min poll window doesn't expire before
+// the next verify attempt.
+const PENDING_PAYMENT_TTL = 90 * 60;
+
+// Bug 12: negative cache for scanForPayment. When a scan returns no
+// match, we record a "no match" marker for 5 seconds so rapid polling
+// from the same payment ID doesn't hammer the upstream APIs.
+const NO_MATCH_CACHE_TTL = 5;
+
+// Bug 8: per-address scan cache for EVM and Solana (TRON already has
+// its own cache). TTL is short enough that a payment landing right
+// after a cached miss is picked up on the next poll.
+const CHAIN_SCAN_CACHE_TTL = 10;
 
 const FREE_CLAIM_CREDITS = 2;
 const FREE_CLAIM_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -166,6 +173,106 @@ const ADMIN_AUTH_FAIL_WINDOW_MS = 15 * 60 * 1000;
 
 const ADMIN_CALL_MAX = 120;
 const ADMIN_RATE_WINDOW_MS = 10 * 60 * 1000;
+
+// =====================================================================
+// CORS — Bug 11
+// =====================================================================
+//
+// If ALLOWED_ORIGINS is set, only requests from those origins get a
+// matching Access-Control-Allow-Origin header. If it's unset, we fall
+// back to '*' so existing deployments keep working. Set ALLOWED_ORIGINS
+// to a comma-separated list in production, e.g.
+//   ALLOWED_ORIGINS=https://sweeper.cloud,https://www.sweeper.cloud
+// =====================================================================
+
+function corsFor(request, env) {
+  const allowed = (env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const origin = request.headers.get('Origin') || '';
+
+  let allowOrigin = '*';
+  if (allowed.length > 0) {
+    allowOrigin = allowed.includes(origin) ? origin : allowed[0];
+  }
+
+  return {
+    'Access-Control-Allow-Origin': allowOrigin,
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, X-Operator-Secret',
+    'Vary': 'Origin',
+  };
+}
+
+// =====================================================================
+// AMOUNT ROUNDING — Bug 1
+// =====================================================================
+//
+// Each payment gets a unique fractional suffix so two concurrent quotes
+// in the same bundle don't collide. The suffix range is 10000 (not
+// 100), so up to 10k concurrent pending payments in the same bundle
+// can be uniquely identified.
+// =====================================================================
+
+const ROUNDING_STEP_RAW = {
+  USDC: (decimals) => decimals === 6 ? 10n ** 4n : 10n ** 16n,
+  USDT: (decimals) => decimals === 6 ? 10n ** 4n : 10n ** 16n,
+  ETH:  ()         => 10n ** 14n,
+  SOL:  ()         => 10n ** 6n,
+  BTC:  ()         => 10n ** 3n,
+};
+
+const SUFFIX_RANGE = 10000n;
+
+function roundUpToTypable(token, decimals, raw) {
+  const stepFn = ROUNDING_STEP_RAW[token];
+  if (!stepFn) return raw;
+
+  const step = stepFn(decimals);
+  const rounded = ((raw + step - 1n) / step) * step;
+  const maxOffset = step - 1n;
+  const offset = maxOffset > 0n
+    ? BigInt(Math.floor(Math.random() * Number(SUFFIX_RANGE))) % maxOffset + 1n
+    : 0n;
+  return rounded + offset;
+}
+
+function toleranceFor(expectedRaw) {
+  const expected = BigInt(expectedRaw);
+  return expected / 1000n;
+}
+
+// =====================================================================
+// QR PAYLOAD BUILDERS
+// =====================================================================
+
+function buildQrPayload(chain, token, address, expectedRaw, decimals) {
+  if (chain === 'solana') {
+    const amount = formatUnits(expectedRaw, decimals);
+    return `solana:${address}?amount=${amount}`;
+  }
+  if (chain === 'bitcoin') {
+    const amount = formatUnits(expectedRaw, decimals);
+    return `bitcoin:${address}?amount=${amount}`;
+  }
+  if (chain === 'tron') {
+    return address;
+  }
+  const chainId = CHAIN_IDS[chain];
+  if (!chainId) return address;
+  if (token === 'ETH') {
+    return `ethereum:${address}@${chainId}?value=${expectedRaw}`;
+  }
+  const contract = TOKEN_ADDRESSES[chain]?.[token];
+  if (!contract) return address;
+  return `ethereum:${contract}@${chainId}/transfer?address=${address}&uint256=${expectedRaw}`;
+}
+
+function formatUnits(raw, decimals) {
+  const s = BigInt(raw).toString();
+  const padded = s.padStart(decimals + 1, '0');
+  const whole = padded.slice(0, padded.length - decimals);
+  const frac = padded.slice(padded.length - decimals).replace(/0+$/, '');
+  return frac.length ? `${whole}.${frac}` : whole;
+}
 
 const HEX_KEY_RE = /^0x[a-fA-F0-9]{64}$/;
 const MNEMONIC_RE = /^(\S+\s+){11,23}\S+$/;
@@ -201,11 +308,7 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    const cors = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, X-Operator-Secret',
-    };
+    const cors = corsFor(request, env);
 
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: cors });
@@ -275,12 +378,16 @@ export async function handleCryptoQuote(request, env, cors) {
 
   const usdAmount = bundleConfig.priceCents / 100;
   const cryptoAmount = usdAmount / rate.price;
-  const cryptoAmountRaw = BigInt(Math.round(cryptoAmount * Math.pow(10, rate.decimals)));
-  const uniqueSuffix = BigInt(Math.floor(Math.random() * 10000));
-  const finalRaw = cryptoAmountRaw + uniqueSuffix;
+  const baseRaw = BigInt(Math.round(cryptoAmount * Math.pow(10, rate.decimals)));
+
+  const finalRaw = roundUpToTypable(rate.token, rate.decimals, baseRaw);
 
   const paymentId = crypto.randomUUID();
   const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+
+  const qrPayload = buildQrPayload(
+    methodConfig.chain, methodConfig.token, address, finalRaw, rate.decimals
+  );
 
   await env.PENDING_PAYMENTS.put(
     `crypto:${paymentId}`,
@@ -290,7 +397,7 @@ export async function handleCryptoQuote(request, env, cors) {
       expectedRaw: finalRaw.toString(), decimals: rate.decimals,
       address, expiresAt, createdAt: new Date().toISOString(),
     }),
-    { expirationTtl: 60 * 60 }
+    { expirationTtl: PENDING_PAYMENT_TTL }
   );
 
   return json({
@@ -304,12 +411,13 @@ export async function handleCryptoQuote(request, env, cors) {
     usd_price: usdAmount,
     credits: bundleConfig.credits,
     expires_at: expiresAt,
+    qr_payload: qrPayload,
   }, 200, cors);
 }
 
 export async function getCryptoRate(methodConfig) {
   if (methodConfig.token === 'USDC' || methodConfig.token === 'USDT') {
-    return { price: 1.0, decimals: methodConfig.decimals };
+    return { price: 1.0, decimals: methodConfig.decimals, token: methodConfig.token };
   }
   const coinIds = { ETH: 'ethereum', SOL: 'solana', BTC: 'bitcoin' };
   const id = coinIds[methodConfig.token];
@@ -319,7 +427,7 @@ export async function getCryptoRate(methodConfig) {
     const data = await resp.json();
     const price = data[id]?.usd;
     if (!price) return null;
-    return { price, decimals: methodConfig.decimals };
+    return { price, decimals: methodConfig.decimals, token: methodConfig.token };
   } catch { return null; }
 }
 
@@ -346,7 +454,7 @@ export async function handleCryptoVerify(request, env, cors) {
   await env.CREDITS.put(lockKey, '1', { expirationTtl: CRYPTO_VERIFY_LOCK_TTL });
 
   try {
-    const found = await scanForPayment(env, pending);
+    const found = await scanForPayment(env, pending, payment_id);
     if (!found) return json({ status: 'pending', message: 'No matching transaction found yet' }, 200, cors);
 
     const refreshedRaw = await env.PENDING_PAYMENTS.get(`crypto:${payment_id}`);
@@ -360,13 +468,19 @@ export async function handleCryptoVerify(request, env, cors) {
     const balance = await addCredits(env, pending.clientId, pending.credits, {
       type: 'crypto', method: pending.method, chain: pending.chain,
       token: pending.token, txHash: found.txHash, credits: pending.credits,
+      receivedRaw: found.receivedRaw || pending.expectedRaw,
     });
 
     pending.verified = true;
     pending.txHash = found.txHash;
+    pending.receivedRaw = found.receivedRaw || pending.expectedRaw;
     await env.PENDING_PAYMENTS.put(`crypto:${payment_id}`, JSON.stringify(pending), {
       expirationTtl: 60 * 60 * 24 * 7,
     });
+
+    // Clear the negative cache so a subsequent payment to the same
+    // address isn't shadowed by this one's "no match" marker.
+    await env.CREDITS.delete(`crypto:nomatch:${payment_id}`).catch(() => {});
 
     return json({ ok: true, creditsAdded: pending.credits, newBalance: balance, txHash: found.txHash }, 200, cors);
   } finally {
@@ -374,12 +488,40 @@ export async function handleCryptoVerify(request, env, cors) {
   }
 }
 
-export async function scanForPayment(env, pending) {
+// =====================================================================
+// scanForPayment — negative cache wrapper (Bug 12)
+// =====================================================================
+
+export async function scanForPayment(env, pending, paymentId) {
+  // Check the negative cache first. If we scanned recently and found
+  // nothing, skip the upstream call entirely for NO_MATCH_CACHE_TTL
+  // seconds. This is what keeps the TronGrid and Etherscan quotas from
+  // being drained by 5-second polling.
+  if (paymentId) {
+    const noMatchKey = `crypto:nomatch:${paymentId}`;
+    const cached = await env.CREDITS.get(noMatchKey);
+    if (cached) return null;
+  }
+
   const { chain, token, address, expectedRaw } = pending;
-  if (chain === 'solana') return await scanSolana(env, address, expectedRaw);
-  if (chain === 'bitcoin') return await scanBitcoin(env, address, expectedRaw);
-  return await scanEvmChain(env, chain, token, address, expectedRaw);
+  let result = null;
+  if (chain === 'solana') result = await scanSolana(env, address, expectedRaw);
+  else if (chain === 'bitcoin') result = await scanBitcoin(env, address, expectedRaw);
+  else if (chain === 'tron') result = await scanTron(env, address, expectedRaw, token);
+  else result = await scanEvmChain(env, chain, token, address, expectedRaw);
+
+  if (!result && paymentId) {
+    await env.CREDITS.put(`crypto:nomatch:${paymentId}`, '1', {
+      expirationTtl: NO_MATCH_CACHE_TTL,
+    }).catch(() => {});
+  }
+
+  return result;
 }
+
+// =====================================================================
+// scanEvmChain — with per-address cache (Bug 8)
+// =====================================================================
 
 export async function scanEvmChain(env, chain, token, address, expectedRaw) {
   const apiKey = env.ETHERSCAN_API_KEY;
@@ -387,62 +529,190 @@ export async function scanEvmChain(env, chain, token, address, expectedRaw) {
   const chainId = CHAIN_IDS[chain];
   if (!chainId) return null;
 
-  const baseUrl = `https://api.etherscan.io/v2/api?chainid=${chainId}`;
+  const cacheKey = `evm:scan:${chain}:${token}:${address}`;
+  let rows = null;
 
-  if (token === 'USDC' || token === 'USDT') {
-    const contract = TOKEN_ADDRESSES[chain]?.[token];
-    if (!contract) return null;
-    const url = `${baseUrl}&module=account&action=tokentx&contractaddress=${contract}&address=${address}&sort=desc&apikey=${apiKey}`;
-    const resp = await fetch(url);
-    const data = await resp.json();
-    if (!data.result || !Array.isArray(data.result)) return null;
-    for (const tx of data.result.slice(0, 20)) {
-      if (tx.to?.toLowerCase() === address.toLowerCase() && tx.value === expectedRaw) {
-        return { txHash: tx.hash, blockNumber: tx.blockNumber };
-      }
-    }
-    return null;
+  const cachedRaw = await env.CREDITS.get(cacheKey);
+  if (cachedRaw) {
+    try { rows = JSON.parse(cachedRaw); } catch { rows = null; }
   }
 
-  if (token === 'ETH') {
-    const url = `${baseUrl}&module=account&action=txlist&address=${address}&sort=desc&apikey=${apiKey}`;
-    const resp = await fetch(url);
-    const data = await resp.json();
-    if (!data.result || !Array.isArray(data.result)) return null;
-    for (const tx of data.result.slice(0, 20)) {
-      if (tx.to?.toLowerCase() === address.toLowerCase() && tx.value === expectedRaw) {
-        return { txHash: tx.hash, blockNumber: tx.blockNumber };
-      }
+  const expected = BigInt(expectedRaw);
+  const tol = toleranceFor(expectedRaw);
+  const lo = expected - tol;
+  const hi = expected + tol;
+
+  if (!rows) {
+    const baseUrl = `https://api.etherscan.io/v2/api?chainid=${chainId}`;
+
+    if (token === 'USDC' || token === 'USDT') {
+      const contract = TOKEN_ADDRESSES[chain]?.[token];
+      if (!contract) return null;
+      const url = `${baseUrl}&module=account&action=tokentx&contractaddress=${contract}&address=${address}&sort=desc&apikey=${apiKey}`;
+      const resp = await fetch(url);
+      const data = await resp.json();
+      if (!data.result || !Array.isArray(data.result)) return null;
+      rows = data.result.slice(0, 20).map((tx) => ({
+        hash: tx.hash,
+        blockNumber: tx.blockNumber,
+        to: tx.to,
+        value: tx.value,
+      }));
+    } else if (token === 'ETH') {
+      const url = `${baseUrl}&module=account&action=txlist&address=${address}&sort=desc&apikey=${apiKey}`;
+      const resp = await fetch(url);
+      const data = await resp.json();
+      if (!data.result || !Array.isArray(data.result)) return null;
+      rows = data.result.slice(0, 20).map((tx) => ({
+        hash: tx.hash,
+        blockNumber: tx.blockNumber,
+        to: tx.to,
+        value: tx.value,
+      }));
+    } else {
+      return null;
     }
-    return null;
+
+    await env.CREDITS.put(cacheKey, JSON.stringify(rows), {
+      expirationTtl: CHAIN_SCAN_CACHE_TTL,
+    }).catch(() => {});
   }
 
+  for (const tx of rows) {
+    if (tx.to?.toLowerCase() !== address.toLowerCase()) continue;
+    const v = BigInt(tx.value);
+    if (v >= lo && v <= hi) {
+      return { txHash: tx.hash, blockNumber: tx.blockNumber, receivedRaw: tx.value };
+    }
+  }
   return null;
 }
+
+// =====================================================================
+// scanSolana — with per-address cache (Bug 8)
+// =====================================================================
 
 export async function scanSolana(env, address, expectedRaw) {
-  const resp = await fetch(`https://api.helius.xyz/v0/addresses/${address}/transactions?api-key=${env.HELIUS_API_KEY}&limit=20`);
-  if (!resp.ok) return null;
-  const txs = await resp.json();
-  if (!Array.isArray(txs)) return null;
+  const cacheKey = `sol:scan:${address}`;
+  let transfers = null;
+
+  const cachedRaw = await env.CREDITS.get(cacheKey);
+  if (cachedRaw) {
+    try { transfers = JSON.parse(cachedRaw); } catch { transfers = null; }
+  }
+
+  if (!transfers) {
+    const resp = await fetch(`https://api.helius.xyz/v0/addresses/${address}/transactions?api-key=${env.HELIUS_API_KEY}&limit=20`);
+    if (!resp.ok) return null;
+    const txs = await resp.json();
+    if (!Array.isArray(txs)) return null;
+    transfers = txs.map((tx) => ({
+      sig: tx.signature,
+      nativeTransfers: (tx.nativeTransfers || []).map((t) => ({
+        to: t.toUserAccount,
+        amount: String(t.amount),
+      })),
+    }));
+    await env.CREDITS.put(cacheKey, JSON.stringify(transfers), {
+      expirationTtl: CHAIN_SCAN_CACHE_TTL,
+    }).catch(() => {});
+  }
+
   const expected = BigInt(expectedRaw);
-  for (const tx of txs) {
-    for (const t of tx.nativeTransfers || []) {
-      if (t.toUserAccount === address && BigInt(t.amount) === expected) return { txHash: tx.signature };
+  const tol = toleranceFor(expectedRaw);
+  const lo = expected - tol;
+  const hi = expected + tol;
+
+  for (const tx of transfers) {
+    for (const t of tx.nativeTransfers) {
+      if (t.to !== address) continue;
+      const v = BigInt(t.amount);
+      if (v >= lo && v <= hi) {
+        return { txHash: tx.sig, receivedRaw: t.amount };
+      }
     }
   }
   return null;
 }
+
+// =====================================================================
+// scanBitcoin — no cache (mempool.space is generous, no rate pressure)
+// =====================================================================
 
 export async function scanBitcoin(env, address, expectedRaw) {
   const resp = await fetch(`https://mempool.space/api/address/${address}/txs`);
   if (!resp.ok) return null;
   const txs = await resp.json();
   if (!Array.isArray(txs)) return null;
-  const expected = parseInt(expectedRaw, 10);
+
+  const expected = BigInt(expectedRaw);
+  const tol = toleranceFor(expectedRaw);
+  const lo = expected - tol;
+  const hi = expected + tol;
+
   for (const tx of txs.slice(0, 20)) {
     for (const vout of tx.vout || []) {
-      if (vout.scriptpubkey_address === address && vout.value === expected) return { txHash: tx.txid };
+      if (vout.scriptpubkey_address !== address) continue;
+      const v = BigInt(vout.value);
+      if (v >= lo && v <= hi) {
+        return { txHash: tx.txid, receivedRaw: String(vout.value) };
+      }
+    }
+  }
+  return null;
+}
+
+// =====================================================================
+// scanTron — with cache (already had it)
+// =====================================================================
+
+export async function scanTron(env, address, expectedRaw, token) {
+  const apiKey = env.TRONGRID_API_KEY;
+  if (!apiKey) return null;
+
+  const contractAddress = TOKEN_ADDRESSES.tron?.[token];
+  if (!contractAddress) return null;
+
+  const cacheKey = `tron:scan:${address}`;
+  let transfers = null;
+
+  const cachedRaw = await env.CREDITS.get(cacheKey);
+  if (cachedRaw) {
+    try { transfers = JSON.parse(cachedRaw); } catch { transfers = null; }
+  }
+
+  if (!transfers) {
+    const url = `https://api.trongrid.io/v1/accounts/${address}/transactions/trc20`
+      + `?limit=30&contract_address=${contractAddress}`;
+    let resp;
+    try {
+      resp = await fetch(url, {
+        headers: { 'TRON-PRO-API-KEY': apiKey },
+      });
+    } catch {
+      return null;
+    }
+    if (!resp.ok) return null;
+    let body;
+    try { body = await resp.json(); } catch { return null; }
+    transfers = Array.isArray(body?.data) ? body.data : [];
+    await env.CREDITS.put(cacheKey, JSON.stringify(transfers), {
+      expirationTtl: CHAIN_SCAN_CACHE_TTL,
+    }).catch(() => {});
+  }
+
+  const expected = BigInt(expectedRaw);
+  const tol = toleranceFor(expectedRaw);
+  const lo = expected - tol;
+  const hi = expected + tol;
+
+  for (const t of transfers) {
+    if (t.token_address !== contractAddress) continue;
+    if (t.to !== address) continue;
+    if (t.type !== 'Transfer') continue;
+    const v = BigInt(t.value);
+    if (v >= lo && v <= hi) {
+      return { txHash: t.transaction_id, receivedRaw: String(v) };
     }
   }
   return null;
@@ -1486,6 +1756,9 @@ export {
   SPONSOR_IDEM_TTL,
   CONSUME_IDEM_TTL,
   CRYPTO_VERIFY_LOCK_TTL,
+  PENDING_PAYMENT_TTL,
+  NO_MATCH_CACHE_TTL,
+  CHAIN_SCAN_CACHE_TTL,
   FREE_CLAIM_CREDITS,
   FREE_CLAIM_WINDOW_MS,
   FREE_CLAIM_USE_WINDOW_MS,

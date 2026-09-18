@@ -1,5 +1,5 @@
 /* =====================================================================
-   SWEEPER — MARKETING STYLES
+   SWEEPER — MARKETING STYLES (used by index.html)
    ===================================================================== */
 
 :root {
@@ -68,6 +68,25 @@ a:hover { text-decoration: underline; }
 .btn-secondary { background: transparent; color: var(--text); border-color: #30363d; }
 .btn-secondary:hover { border-color: var(--muted); }
 
+/* ---------- PROMO STRIP ---------- */
+.promo-strip {
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 0;
+    font-size: 14px;
+}
+.promo-strip .wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.promo-strip .promo-icon { font-size: 16px; }
+.promo-strip strong { color: var(--text); }
+.promo-strip span { color: var(--muted); }
+.promo-link { color: var(--accent); font-weight: 500; margin-left: 4px; }
+
 /* ---------- HERO ---------- */
 .hero { padding: 100px 0 80px; text-align: center; }
 .hero h1 {
@@ -79,9 +98,7 @@ a:hover { text-decoration: underline; }
 }
 .hero h1 .muted { color: var(--muted); }
 
-/* USDC logo, on its own line under the headline.
-   Fixed height keeps it optically balanced against the H1.
-   Adjust the height value to taste. */
+/* USDC logo, on its own line under the headline. */
 .usdc-mark {
     display: block;
     height: 52px;
@@ -98,9 +115,7 @@ a:hover { text-decoration: underline; }
 }
 .lede strong { color: var(--text); }
 
-/* The line directly below the hero lede. The first sentence is in
-   caps so it reads as a deliberate emphasis; the second is sentence
-   case so it doesn't feel like shouting. */
+/* The line directly below the hero lede. */
 .hero-subtag {
     font-size: 20px;
     line-height: 1.3;
@@ -137,25 +152,6 @@ section h2 {
 }
 section .lede { text-align: center; margin-bottom: 60px; }
 
-/* ---------- PROMO STRIP ---------- */
-.promo-strip {
-    background: var(--bg-card);
-    border-bottom: 1px solid var(--border);
-    padding: 12px 0;
-    font-size: 14px;
-}
-.promo-strip .wrap {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    flex-wrap: wrap;
-}
-.promo-strip .promo-icon { font-size: 16px; }
-.promo-strip strong { color: var(--text); }
-.promo-strip span { color: var(--muted); }
-.promo-link { color: var(--accent); font-weight: 500; margin-left: 4px; }
-
 /* ---------- PROBLEM ---------- */
 .problem {
     background: var(--bg-card);
@@ -174,7 +170,6 @@ section .lede { text-align: center; margin-bottom: 60px; }
     margin-bottom: 16px;
     color: var(--muted);
 }
-
 .problem p strong,
 .problem p > strong {
     color: var(--text);
@@ -186,13 +181,11 @@ section .lede { text-align: center; margin-bottom: 60px; }
     padding-left: 0;
     margin-bottom: 16px;
 }
-
 .problem li {
     padding: 8px 0 8px 24px;
     position: relative;
     color: var(--muted);
 }
-
 .problem li:before {
     content: "→";
     position: absolute;
@@ -215,7 +208,6 @@ section .lede { text-align: center; margin-bottom: 60px; }
     color: var(--muted);
     font-size: 15px;
 }
-
 .problem-extra-block p strong,
 .problem-extra-block p > strong {
     color: var(--text);
@@ -227,7 +219,6 @@ section .lede { text-align: center; margin-bottom: 60px; }
     padding-left: 0;
     margin: 0;
 }
-
 .problem-extra-block li {
     padding: 6px 0 6px 24px;
     position: relative;
@@ -235,7 +226,6 @@ section .lede { text-align: center; margin-bottom: 60px; }
     font-size: 14px;
     line-height: 1.6;
 }
-
 .problem-extra-block li:before {
     content: "✓";
     position: absolute;
@@ -341,23 +331,11 @@ section .lede { text-align: center; margin-bottom: 60px; }
     gap: 24px;
     margin-top: 40px;
 }
-
 .pricing-grid-3 {
     grid-template-columns: repeat(3, 1fr);
     margin-top: 40px;
 }
-
-.pricing-grid-3 + .pricing-grid-3 {
-    margin-top: 24px;
-}
-
-.pricing-grid-secondary {
-    grid-template-columns: repeat(2, 1fr);
-    margin-top: 24px;
-    max-width: 720px;
-    margin-left: auto;
-    margin-right: auto;
-}
+.pricing-grid-3 + .pricing-grid-3 { margin-top: 24px; }
 
 .price-card {
     background: var(--bg-card);
@@ -366,7 +344,6 @@ section .lede { text-align: center; margin-bottom: 60px; }
     padding: 32px 28px;
     position: relative;
 }
-
 .price-card.featured {
     border-color: var(--primary);
     box-shadow: 0 0 0 1px var(--primary);
@@ -399,9 +376,9 @@ section .lede { text-align: center; margin-bottom: 60px; }
     letter-spacing: -0.02em;
     margin-bottom: 4px;
 }
-
 .price span { font-size: 16px; font-weight: 400; color: var(--muted); }
 .price-sub { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+
 .price-card ul { list-style: none; padding: 0; margin-bottom: 24px; }
 .price-card li {
     padding: 8px 0 8px 24px;
@@ -415,6 +392,7 @@ section .lede { text-align: center; margin-bottom: 60px; }
     left: 0;
     color: var(--primary);
 }
+
 .pricing-note {
     text-align: center;
     color: var(--muted);
@@ -427,7 +405,6 @@ section .lede { text-align: center; margin-bottom: 60px; }
     border-bottom: 1px solid var(--border);
     padding: 20px 0;
 }
-
 .faq summary {
     cursor: pointer;
     font-weight: 500;
@@ -437,18 +414,14 @@ section .lede { text-align: center; margin-bottom: 60px; }
     justify-content: space-between;
     align-items: center;
 }
-
 .faq summary::-webkit-details-marker { display: none; }
-
 .faq summary:after {
     content: "+";
     font-size: 24px;
     color: var(--muted);
     transition: transform 0.2s;
 }
-
 .faq details[open] summary:after { transform: rotate(45deg); }
-
 .faq details p {
     margin-top: 16px;
     color: var(--muted);
@@ -463,7 +436,6 @@ section .lede { text-align: center; margin-bottom: 60px; }
     border-top: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
 }
-
 .final-cta h2 { margin-bottom: 32px; }
 .final-cta .hint { color: var(--muted); font-size: 14px; margin-top: 16px; }
 
@@ -499,9 +471,7 @@ section .lede { text-align: center; margin-bottom: 60px; }
 
 /* ---------- RESPONSIVE ---------- */
 @media (max-width: 900px) {
-    .pricing-grid-3 {
-        grid-template-columns: repeat(2, 1fr);
-    }
+    .pricing-grid-3 { grid-template-columns: repeat(2, 1fr); }
 }
 
 @media (max-width: 768px) {
@@ -521,10 +491,5 @@ section .lede { text-align: center; margin-bottom: 60px; }
 }
 
 @media (max-width: 640px) {
-    .pricing-grid-3 {
-        grid-template-columns: 1fr;
-    }
-    .pricing-grid-secondary {
-        grid-template-columns: 1fr;
-    }
+    .pricing-grid-3 { grid-template-columns: 1fr; }
 }

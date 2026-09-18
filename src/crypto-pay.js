@@ -6,6 +6,8 @@ import QRCode from 'qrcode';
 import { requestCryptoQuote, pollCryptoPayment } from './credits.js';
 import { el } from './ui.js';
 
+// Prices must match BUNDLES in payment-worker.js and the public
+// pricing page. If you change one, change all three.
 const BUNDLES = [
   { id: 'single',  label: '1 credit',  price: '$10',  hint: '$10.00 per sweep' },
   { id: 'pack-5',  label: '5 credits', price: '$20',  hint: '$4.00 per sweep' },
@@ -14,7 +16,6 @@ const BUNDLES = [
   { id: 'pack-50', label: '50 credits',price: '$150', hint: '$3.00 per sweep' },
 ];
 
-// Tokens first, then chains within each token.
 const TOKENS = [
   {
     id: 'usdc', label: 'USDC', icon: '🔵', hint: 'USD Coin — stablecoin',
@@ -36,6 +37,7 @@ const TOKENS = [
       { id: 'usdt-polygon',  label: 'Polygon',  hint: '~$0.01 gas' },
       { id: 'usdt-bnb',      label: 'BNB Chain',hint: '~$0.05 gas' },
       { id: 'usdt-ethereum', label: 'Ethereum', hint: '~$5-20 gas' },
+      { id: 'usdt-tron',     label: 'TRON',     hint: '~$0.01-0.10 gas' },
     ],
   },
   {
@@ -142,7 +144,6 @@ function renderTokenPicker(ctx, bundle) {
       class: 'crypto-method',
       onclick: () => {
         if (t.chains.length === 1) {
-          // Only one chain — skip the picker and go straight to payment
           renderPayment(ctx, bundle, t.chains[0], t);
         } else {
           renderChainPicker(ctx, bundle, t);
@@ -199,8 +200,6 @@ async function renderPayment(ctx, bundle, chain, token) {
 
   const body = el('div', { class: 'modal-body' });
 
-  // Back button: goes to chain picker if the token has multiple chains,
-  // otherwise back to the token picker.
   const backTarget = token.chains.length > 1
     ? () => renderChainPicker(ctx, bundle, token)
     : () => renderTokenPicker(ctx, bundle);
@@ -242,10 +241,19 @@ async function renderPayment(ctx, bundle, chain, token) {
   const qrContainer = el('div', { class: 'crypto-qr' });
   body.appendChild(qrContainer);
 
-  // QR payload is the raw address. The unique fractional amount must
-  // be entered exactly; pre-filling it in a QR would risk truncation
-  // by the paying wallet, breaking exact-match detection.
-  QRCode.toCanvas(quote.address, { width: 220, margin: 2 })
+  // Bug 10: TRON wallets don't universally honor an amount in the QR
+  // payload, so we tell the user to type the amount themselves.
+  if (quote.chain === 'tron') {
+    body.appendChild(el('p', {
+      class: 'hint',
+      style: 'text-align: center; font-size: 12px; margin-top: -8px; margin-bottom: 12px;',
+      text: "TRON wallets don't auto-fill the amount from a QR — please type the exact amount shown above.",
+    }));
+  }
+
+  const qrPayload = quote.qr_payload || quote.address;
+
+  QRCode.toCanvas(qrPayload, { width: 220, margin: 2 })
     .then((canvas) => {
       canvas.style.background = '#fff';
       canvas.style.borderRadius = '8px';
@@ -267,7 +275,12 @@ async function renderPayment(ctx, bundle, chain, token) {
   }));
 
   try {
+    // Bug 7: poll for 60 minutes, not 30. The worker keeps the pending
+    // record alive for 90 minutes, so this leaves headroom if the tab
+    // is backgrounded and setTimeout throttles.
     const result = await pollCryptoPayment(quote.payment_id, {
+      timeoutMs: 60 * 60 * 1000,
+      intervalMs: 5000,
       onTick: (attempt, total) => {
         if (pollCancelled) return;
         const p = status.querySelector('p');

@@ -38,7 +38,7 @@ export async function initSentry() {
 // here.
 //
 // Patterns handled:
-//   - 0x + 20+ hex chars       → addresses, tx hashes (existing)
+//   - 0x + 20+ hex chars       → addresses, tx hashes
 //   - 12+ consecutive lowercase words → BIP-39 phrase shape
 // =====================================================================
 
@@ -63,8 +63,6 @@ function scrubEvent(event) {
     delete event.extra.destination;
   }
 
-  // Sentry stores the human-readable error text on the exception entries,
-  // not on event.message. Scrub each one.
   if (event.exception?.values) {
     for (const ex of event.exception.values) {
       if (typeof ex.value === 'string') ex.value = scrubString(ex.value);
@@ -75,7 +73,6 @@ function scrubEvent(event) {
     event.message = scrubString(event.message);
   }
 
-  // Breadcrumbs attached to the event carry their own message strings.
   if (Array.isArray(event.breadcrumbs)) {
     for (const bc of event.breadcrumbs) {
       if (typeof bc.message === 'string') bc.message = scrubString(bc.message);
@@ -89,6 +86,20 @@ function scrubBreadcrumb(bc) {
   if (bc.category === 'fetch' || bc.category === 'xhr') {
     if (bc.data?.url) bc.data.url = bc.data.url.split('?')[0];
     if (bc.data?.body) bc.data.body = '[scrubbed]';
+  }
+  // Scrub data for any category. Console breadcrumbs and custom
+  // breadcrumbs can carry mnemonic or key strings just as easily as
+  // fetch bodies, and the previous version only covered fetch/xhr.
+  if (bc.data !== undefined) {
+    if (typeof bc.data === 'string') {
+      bc.data = scrubString(bc.data);
+    } else if (bc.data !== null && typeof bc.data === 'object') {
+      try {
+        bc.data = JSON.parse(scrubString(JSON.stringify(bc.data)));
+      } catch {
+        bc.data = '[scrubbed]';
+      }
+    }
   }
   if (typeof bc.message === 'string') bc.message = scrubString(bc.message);
   return bc;

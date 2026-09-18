@@ -71,6 +71,7 @@ import {
   recordFee, requestGasSponsorship,
   fetchClaimInfo, claimFreeCredits,
   commitSweep,
+  isValidClientId, setClientId, verifyClientId,
 } from './credits.js';
 import { showCryptoPaymentModal } from './crypto-pay.js';
 import {
@@ -97,6 +98,9 @@ let freeClaimTimer = null;
 let creditsBadgeTimer = null;
 
 const MIN_SPONSOR_FLOOR_USDC = 0.02;
+const MAX_MNEMONICS_PER_SWEEP = 20;
+
+const userTouchedChains = new Set();
 
 // =====================================================================
 // VALIDATION HELPERS
@@ -170,14 +174,12 @@ function syncMnemonicNotice() {
   notice.style.display = walletType === 'mnemonic' ? '' : 'none';
 }
 
-/**
- * Sync the family checkboxes and their labels to the selected wallet
- * type.
- *
- *   mnemonic   → EVM, Solana, Bitcoin, TRON all visible and checked.
- *   extension  → EVM and TRON visible and checked.
- *   anything   → EVM only.
- */
+function invalidatePreview() {
+  state.derivedKeys = null;
+  state.previews = null;
+  hide('#run-button');
+}
+
 function syncWalletTypeDefaults() {
   const walletType = $('input[name=wallet-type]:checked')?.value;
   const isMnemonic = walletType === 'mnemonic';
@@ -207,10 +209,20 @@ function syncWalletTypeDefaults() {
   if (famTron) famTron.checked = showTron;
 
   $$('#chain-list input[type=checkbox]').forEach((cb) => {
-    cb.checked = true;
+    if (!userTouchedChains.has(cb.value)) {
+      cb.checked = true;
+    }
   });
 
   syncDestinationFields();
+}
+
+function trackChainTouches() {
+  $$('#chain-list input[type=checkbox]').forEach((cb) => {
+    cb.addEventListener('change', () => {
+      userTouchedChains.add(cb.value);
+    });
+  });
 }
 
 function readInputs() {
@@ -250,7 +262,10 @@ function validateInputs({ walletType, families, destinations, mnemonics }) {
 
   if (walletType === 'mnemonic') {
     if (mnemonics.length === 0) errors.push('At least one mnemonic is required.');
-    for (let i = 0; i < mnemonics.length; i++) {
+    if (mnemonics.length > MAX_MNEMONICS_PER_SWEEP) {
+      errors.push(`Maximum ${MAX_MNEMONICS_PER_SWEEP} mnemonics per sweep (you pasted ${mnemonics.length}).`);
+    }
+    for (let i = 0; i < mnemonics.length && i < MAX_MNEMONICS_PER_SWEEP; i++) {
       if (!validateMnemonic(mnemonics[i])) {
         errors.push(`Mnemonic #${i + 1} is not a valid BIP-39 phrase.`);
       }
@@ -333,6 +348,124 @@ function syncDestinationFields() {
   if (evmWrap) evmWrap.style.display = (evm || solana || bitcoin || tron) ? '' : 'none';
   const chainList = $('#chain-list');
   if (chainList) chainList.style.display = evm ? '' : 'none';
+
+  const label = $('#dest-evm-label');
+  const hint = $('#dest-evm-hint');
+  if (label && hint) {
+    if (!evm && (solana || bitcoin || tron)) {
+      label.textContent = 'Destination (receives USDC on Ethereum after bridge)';
+      hint.textContent = 'Non-EVM sweeps are bridged to Ethereum USDC and delivered to this 0x address.';
+    } else {
+      label.textContent = 'Destination (receives USDC on Ethereum)';
+      hint.textContent = 'EVM sweeps deliver USDC directly. Solana, Bitcoin, and TRON sweeps are bridged to Ethereum USDC and delivered here.';
+    }
+  }
+}
+
+// =====================================================================
+// ACCOUNT SECTION
+// =====================================================================
+
+function initAccountSection() {
+  const idEl = document.getElementById('account-client-id');
+  const copyBtn = document.getElementById('account-copy-btn');
+  const input = document.getElementById('account-restore-input');
+  const restoreBtn = document.getElementById('account-restore-btn');
+  const cancelBtn = document.getElementById('account-restore-cancel');
+  const status = document.getElementById('account-restore-status');
+  const details = document.querySelector('.account-restore');
+
+  if (!idEl || !input || !restoreBtn) return;
+
+  function readCurrentId() {
+    try { return getClientId(); }
+    catch { return '(localStorage unavailable)'; }
+  }
+
+  function renderCurrent() {
+    idEl.textContent = readCurrentId();
+  }
+  renderCurrent();
+
+  copyBtn?.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(readCurrentId());
+      copyBtn.textContent = 'Copied!';
+      setTimeout(() => (copyBtn.textContent = 'Copy'), 1500);
+    } catch {
+      copyBtn.textContent = 'Failed';
+      setTimeout(() => (copyBtn.textContent = 'Copy'), 1500);
+    }
+  });
+
+  cancelBtn?.addEventListener('click', () => {
+    input.value = '';
+    status.style.display = 'none';
+    if (details) details.open = false;
+  });
+
+  restoreBtn?.addEventListener('click', async () => {
+    const candidate = input.value.trim().toLowerCase();
+    status.style.display = 'block';
+
+    if (!isValidClientId(candidate)) {
+      status.className = 'account-status error';
+      status.textContent = "That doesn't look like a valid client ID. Expected 16+ hex characters.";
+      return;
+    }
+
+    if (candidate === readCurrentId()) {
+      status.className = 'account-status error';
+      status.textContent = "That's already your current client ID.";
+      return;
+    }
+
+    restoreBtn.disabled = true;
+    restoreBtn.textContent = 'Verifying…';
+    status.className = 'account-status';
+    status.textContent = 'Checking the client ID…';
+
+    const result = await verifyClientId(candidate);
+    restoreBtn.disabled = false;
+    restoreBtn.textContent = 'Verify and restore';
+
+    if (!result.valid) {
+      status.className = 'account-status error';
+      status.textContent = 'That client ID has no credits and no history. Restore cancelled.';
+      return;
+    }
+
+    const paid = result.paid ?? 0;
+    const free = result.free ?? 0;
+    const parts = [];
+    if (paid > 0) parts.push(`${paid} paid`);
+    if (free > 0) parts.push(`${free} free`);
+    const summary = parts.length ? parts.join(' + ') : '0';
+
+    const confirmed = window.confirm(
+      `Restore this client ID?\n\n` +
+      `Balance: ${result.balance} credits (${summary})\n\n` +
+      `This will replace your current client ID. If your current ID has credits, ` +
+      `you'll lose access to them unless you've saved it.`
+    );
+    if (!confirmed) {
+      status.style.display = 'none';
+      return;
+    }
+
+    try {
+      setClientId(candidate);
+      invalidateBalanceCache();
+      const snap = await fetchBalanceSnapshot({ force: true });
+      renderCurrent();
+      updateCreditsBadge(snap);
+      status.className = 'account-status success';
+      status.textContent = `Restored. New balance: ${result.balance} credits (${summary}).`;
+    } catch (err) {
+      status.className = 'account-status error';
+      status.textContent = `Restore failed: ${err.message}`;
+    }
+  });
 }
 
 // =====================================================================
@@ -369,34 +502,49 @@ async function withGasSponsorship(chain, walletAddress, action) {
 }
 
 // =====================================================================
-// AUTO-LIVE — value estimates + eligibility
+// AUTO-LIVE — value estimates
 // =====================================================================
 
 async function annotatePreviewValues(inputs) {
+  // All families estimated in parallel. Within each family, entries
+  // are also estimated in parallel. Previously everything was serial,
+  // which took 10+ seconds for a wallet with 6 EVM chains.
+  const tasks = [];
+
   if (inputs.families.evm) {
     for (const p of state.previews.evm) {
-      try { p._usdValue = await estimateChainValueUsdc(p.chain, p); }
-      catch { p._usdValue = 0; }
+      tasks.push((async () => {
+        try { p._usdValue = await estimateChainValueUsdc(p.chain, p); }
+        catch { p._usdValue = 0; }
+      })());
     }
   }
   if (inputs.families.solana) {
     for (const p of state.previews.solana) {
-      try { p._usdValue = await estimateSolanaValueUsdc(p); }
-      catch { p._usdValue = 0; }
+      tasks.push((async () => {
+        try { p._usdValue = await estimateSolanaValueUsdc(p); }
+        catch { p._usdValue = 0; }
+      })());
     }
   }
   if (inputs.families.bitcoin) {
     for (const p of state.previews.bitcoin) {
-      try { p._usdValue = await estimateBitcoinValueUsdc(p); }
-      catch { p._usdValue = 0; }
+      tasks.push((async () => {
+        try { p._usdValue = await estimateBitcoinValueUsdc(p); }
+        catch { p._usdValue = 0; }
+      })());
     }
   }
   if (inputs.families.tron) {
     for (const p of state.previews.tron) {
-      try { p._usdValue = await estimateTronValueUsdc(p); }
-      catch { p._usdValue = 0; }
+      tasks.push((async () => {
+        try { p._usdValue = await estimateTronValueUsdc(p); }
+        catch { p._usdValue = 0; }
+      })());
     }
   }
+
+  await Promise.all(tasks);
 }
 
 function collectEligible() {
@@ -585,10 +733,20 @@ function renderFreeClaimBanner(info) {
         } else if (result.alreadyClaimed) {
           logLine('Free credits already claimed.');
         }
-        const snap = await fetchBalanceSnapshot({ force: true });
-        updateCreditsBadge(snap);
-        const freshInfo = await fetchClaimInfo();
-        renderFreeClaimBanner({ ...freshInfo, ...result, __fresh: true });
+
+        try {
+          const snap = await fetchBalanceSnapshot({ force: true });
+          updateCreditsBadge(snap);
+        } catch (e) {
+          console.warn('Badge refresh after claim failed:', scrubSecret(e.message));
+        }
+
+        try {
+          const freshInfo = await fetchClaimInfo();
+          renderFreeClaimBanner({ ...freshInfo, ...result, __fresh: true });
+        } catch (e) {
+          console.warn('Banner refresh after claim failed:', scrubSecret(e.message));
+        }
       } catch (err) {
         claimBtn.disabled = false;
         claimBtn.textContent = 'Try again';
@@ -602,15 +760,22 @@ function renderFreeClaimBanner(info) {
 // CONNECT WALLET
 // =====================================================================
 
-async function connectWalletAndStore() {
-  const { walletType } = readInputs();
-  return connectWalletAndStoreForType(walletType);
-}
-
 async function connectWalletAndStoreForType(walletType) {
   track.walletSelected(walletType);
+
+  // Dispose any previous wallet before connecting a new one. If the
+  // new connection fails, state.wallet must not remain pointing at
+  // the old (possibly disposed) backend.
+  if (state.wallet) {
+    try { await state.wallet.dispose?.(); } catch {}
+    state.wallet = null;
+  }
+
   try {
-    if (walletType === 'mnemonic') { logLine('Mnemonic mode: keys will be derived during Preview.'); return; }
+    if (walletType === 'mnemonic') {
+      logLine('Mnemonic mode: keys will be derived during Preview.');
+      return;
+    }
     if (walletType === 'extension') {
       logLine('Connecting to browser wallet...');
       const backend = await createWallet({ type: 'extension' });
@@ -916,6 +1081,7 @@ async function runSweep(live, opts = {}) {
   state.results = { evm: [], solana: [], bitcoin: [], tron: [] };
   let successes = 0;
   let failures = 0;
+  let skipped = 0;
 
   const feeReceipts = { evm: [], solana: [], bitcoin: [], tron: [] };
   const sponsoredGasByChain = {};
@@ -1037,15 +1203,17 @@ async function runSweep(live, opts = {}) {
 
             for (const s of sweepResult.swaps) {
               const receivedNote = s.received ? ` (received ${s.received} USDC)` : '';
-              logLine(`  swap ${s.symbol}: ${s.status}${s.txHash ? ' ' + s.txHash : ''}${receivedNote}${s.note ? ' (' + s.note + ')' : ''}${s.error ? ' — ' + s.error : ''}`);
+              logLine(`  swap ${s.symbol}: ${s.status}${s.txHash ? ' ' + s.txHash : ''}${receivedNote}${s.note ? ' (' + s.note + ')' : ''}${s.error ? ' — ' + scrubSecret(s.error) : ''}`);
               if (s.status === 'SUCCESS') { successes++; chainHadAnySuccess[chain] = true; }
-              if (s.status === 'FAILED' || s.status === 'ERROR') failures++;
+              else if (s.status === 'FAILED' || s.status === 'ERROR') failures++;
+              else if (s.status === 'SKIPPED' || s.status === 'NO_ROUTE') skipped++;
             }
             for (const t of sweepResult.transfers) {
               const receivedNote = t.received ? ` (received ${t.received} USDC)` : '';
-              logLine(`  transfer ${t.symbol}: ${t.status}${t.txHash ? ' ' + t.txHash : ''}${receivedNote}`);
+              logLine(`  transfer ${t.symbol}: ${t.status}${t.txHash ? ' ' + t.txHash : ''}${receivedNote}${t.error ? ' — ' + scrubSecret(t.error) : ''}`);
               if (t.status === 'SUCCESS') { successes++; chainHadAnySuccess[chain] = true; }
-              if (t.status === 'FAILED' || t.status === 'ERROR') failures++;
+              else if (t.status === 'FAILED' || t.status === 'ERROR') failures++;
+              else if (t.status === 'SKIPPED') skipped++;
             }
             for (const e of sweepResult.errors) logLine(`  ERROR: ${scrubSecret(e)}`);
           } catch (e) {
@@ -1094,9 +1262,10 @@ async function runSweep(live, opts = {}) {
             const receivedNote = s.received ? ` (expected ${ethers.formatUnits(BigInt(s.received), 6)} USDC on Ethereum)` : '';
             const orderNote = s.orderId ? ` order=${s.orderId.slice(0, 10)}...` : '';
             const note = s.note ? ` (${s.note})` : '';
-            logLine(`  bridge ${mintLabel}: ${s.status} ${s.signature || ''}${orderNote}${receivedNote}${note}${s.error ? ' — ' + s.error : ''}`);
+            logLine(`  bridge ${mintLabel}: ${s.status} ${s.signature || ''}${orderNote}${receivedNote}${note}${s.error ? ' — ' + scrubSecret(s.error) : ''}`);
             if (s.status === 'SUCCESS') successes++;
-            if (s.status === 'FAILED' || s.status === 'ERROR') failures++;
+            else if (s.status === 'FAILED' || s.status === 'ERROR' || s.status === 'BROADCAST_UNKNOWN') failures++;
+            else if (s.status === 'SKIPPED') skipped++;
           }
           for (const e of r.errors) logLine(`  ERROR: ${scrubSecret(e)}`);
         } catch (e) { logLine(`  FATAL: ${scrubSecret(e.message)}`); }
@@ -1122,9 +1291,10 @@ async function runSweep(live, opts = {}) {
           }
           const receivedNote = r.expectedUsdcOut && r.expectedUsdcOut !== '0'
             ? ` (expected ${ethers.formatUnits(BigInt(r.expectedUsdcOut), 6)} USDC on Ethereum)` : '';
-          logLine(`  bridge btc→eth: ${r.status} ${r.txid || ''}${receivedNote}${r.error ? ' — ' + r.error : ''}`);
+          logLine(`  bridge btc→eth: ${r.status} ${r.txid || ''}${receivedNote}${r.error ? ' — ' + scrubSecret(r.error) : ''}`);
           if (r.status === 'SUCCESS') successes++;
-          if (r.status === 'ERROR' || r.status === 'BROADCAST_ERROR') failures++;
+          else if (r.status === 'ERROR' || r.status === 'BROADCAST_ERROR') failures++;
+          else if (r.status === 'TOO_LOW' || r.status === 'EMPTY') skipped++;
         } catch (e) { logLine(`  FATAL: ${scrubSecret(e.message)}`); }
       }
     }
@@ -1159,9 +1329,10 @@ async function runSweep(live, opts = {}) {
             const orderNote = s.orderId ? ` order=${s.orderId.slice(0, 10)}...` : '';
             const txid = s.txid ? ` ${s.txid}` : '';
             const expected = s.amountOutExpected ? ` (expected ${s.amountOutExpected} USDC)` : '';
-            logLine(`  bridge ${s.symbol}: ${s.status}${txid}${orderNote}${expected}${note}${s.error ? ' — ' + s.error : ''}`);
+            logLine(`  bridge ${s.symbol}: ${s.status}${txid}${orderNote}${expected}${note}${s.error ? ' — ' + scrubSecret(s.error) : ''}`);
             if (s.status === 'SUCCESS') successes++;
-            if (s.status === 'FAILED' || s.status === 'ERROR') failures++;
+            else if (s.status === 'FAILED' || s.status === 'ERROR') failures++;
+            else if (s.status === 'SKIPPED') skipped++;
           }
           for (const e of r.errors) logLine(`  ERROR: ${scrubSecret(e)}`);
         } catch (e) { logLine(`  FATAL: ${scrubSecret(e.message)}`); }
@@ -1224,9 +1395,10 @@ async function runSweep(live, opts = {}) {
     if (tronTotal() > 0n) chainsSwept.push('tron→eth');
 
     logLine(`  Chains swept:      ${chainsSwept.length ? chainsSwept.join(', ') : '(none)'}`);
-    logLine(`  Tokens processed:  ${successes + failures}`);
+    logLine(`  Tokens processed:  ${successes + failures + skipped}`);
     logLine(`  Successful swaps:  ${successes}`);
-    if (failures > 0) logLine(`  Skipped:           ${failures}`);
+    if (failures > 0) logLine(`  Failed:            ${failures}`);
+    if (skipped > 0) logLine(`  Skipped:           ${skipped}`);
     logLine('');
 
     if (dryRun) {
@@ -1377,6 +1549,8 @@ async function runSweep(live, opts = {}) {
         }
       } catch (e) {
         logLine(`\nWARN: could not record sweep on the worker after retries: ${scrubSecret(e.message)}`);
+        logLine(`  Your sweep executed but the operator has not been notified.`);
+        logLine(`  Save your sweep ID (${sweepId}) and contact support.`);
       }
     }
 
@@ -1396,6 +1570,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   initSentry().catch(() => {});
   initPlausible();
   getClientId();
+  initAccountSection();
 
   fetchClaimInfo()
     .then(renderFreeClaimBanner)
@@ -1419,6 +1594,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       hide('#connected-banner');
       syncMnemonicNotice();
       syncWalletTypeDefaults();
+      // Any wallet-type change invalidates the current preview.
+      invalidatePreview();
+      // Clear any pasted mnemonics on switch away from mnemonic mode.
+      if (e.target.value !== 'mnemonic') {
+        $('#phrases').value = '';
+      }
     });
   });
 
@@ -1429,9 +1610,23 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   ['#family-evm', '#family-solana', '#family-bitcoin', '#family-tron'].forEach((sel) => {
     const el = $(sel);
-    if (el) el.addEventListener('change', syncDestinationFields);
+    if (el) el.addEventListener('change', () => {
+      syncDestinationFields();
+      // Family change invalidates the current preview.
+      invalidatePreview();
+    });
   });
   syncDestinationFields();
+  trackChainTouches();
+
+  // Chain checkbox change invalidates the preview too.
+  $$('#chain-list input[type=checkbox]').forEach((cb) => {
+    cb.addEventListener('change', invalidatePreview);
+  });
+
+  // Editing the mnemonic textarea invalidates the preview, since the
+  // derived keys would no longer match what's in the field.
+  $('#phrases')?.addEventListener('input', invalidatePreview);
 
   const connectButtons = [
     ['#connect-button-extension',     'extension'],
@@ -1446,7 +1641,25 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   $('#preview-button').addEventListener('click', runPreview);
-  $('#run-button').addEventListener('click', () => runSweep(state.mode === 'live'));
+
+  // Run button: disable during execution to prevent double-click
+  // double-sweeps (which would consume two credits and duplicate the
+  // destination commits).
+  $('#run-button').addEventListener('click', async () => {
+    const btn = $('#run-button');
+    if (btn.disabled) return;
+    const originalText = btn.textContent;
+    const originalClass = btn.className;
+    btn.disabled = true;
+    btn.textContent = 'Running…';
+    try {
+      await runSweep(state.mode === 'live');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalText;
+      btn.className = originalClass;
+    }
+  });
 
   $('#buy-credits-button')?.addEventListener('click', async () => {
     try {

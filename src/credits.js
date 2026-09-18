@@ -14,15 +14,67 @@ let cachedBalance = null;
 // CLIENT IDENTITY
 // =====================================================================
 
+export function isValidClientId(id) {
+  return typeof id === 'string'
+    && id.length >= 16
+    && /^[a-f0-9]+$/i.test(id);
+}
+
 export function getClientId() {
   let id = localStorage.getItem(CLIENT_ID_KEY);
-  if (!id || id.length < 16) {
+  if (!isValidClientId(id)) {
     const bytes = new Uint8Array(24);
     crypto.getRandomValues(bytes);
     id = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
     localStorage.setItem(CLIENT_ID_KEY, id);
   }
   return id;
+}
+
+/**
+ * Overwrite the local client ID. Does NOT verify the ID exists on the
+ * worker — callers that need verification should call
+ * verifyClientId() first, then setClientId() on success.
+ */
+export function setClientId(id) {
+  if (!isValidClientId(id)) {
+    throw new Error('Invalid client ID format');
+  }
+  localStorage.setItem(CLIENT_ID_KEY, id);
+  cachedBalance = null;
+}
+
+/**
+ * Check whether a client ID exists on the worker and has any credits
+ * or history. Returns { valid, balance, paid, free, hasHistory }.
+ * Used by the Account restore flow to refuse to overwrite the current
+ * identity with a typo'd or empty ID.
+ *
+ * Uses the public /credits/balance endpoint. If the worker later
+ * exposes an authenticated check, swap it in here.
+ */
+export async function verifyClientId(id) {
+  if (!isValidClientId(id)) {
+    return { valid: false, reason: 'format' };
+  }
+  try {
+    const resp = await fetch(`${PAYMENT_WORKER_URL}/credits/balance`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientId: id }),
+    });
+    if (!resp.ok) return { valid: false, reason: `HTTP ${resp.status}` };
+    const data = await resp.json();
+    const balance = data.balance ?? 0;
+    const paid = data.paid ?? 0;
+    const free = data.free ?? 0;
+    // An ID is considered recoverable if it has any credit at all.
+    // History is not exposed by /credits/balance, so we treat
+    // "paid + free > 0" as the signal that this ID has value.
+    return { valid: balance > 0 || paid > 0 || free > 0, balance, paid, free };
+  } catch (err) {
+    return { valid: false, reason: err.message };
+  }
 }
 
 export function resetClientId() {
@@ -32,13 +84,6 @@ export function resetClientId() {
 
 // =====================================================================
 // CREDIT BALANCE
-// =====================================================================
-//
-// The cached shape is now { balance, free, freeExpiresAt, _fetchedAt }.
-// `balance` is the effective total (paid + live free pool), which is
-// what the badge and every gate should check. `free` and
-// `freeExpiresAt` are for the badge copy ("2 credits · 23h left") and
-// for anything that needs to distinguish free from paid.
 // =====================================================================
 
 export async function fetchBalance(opts = {}) {
@@ -56,6 +101,7 @@ export async function fetchBalance(opts = {}) {
     const data = await resp.json();
     cachedBalance = {
       balance: data.balance,
+      paid: data.paid ?? 0,
       free: data.free ?? 0,
       freeExpiresAt: data.freeExpiresAt ?? null,
       _fetchedAt: Date.now(),
@@ -69,8 +115,7 @@ export async function fetchBalance(opts = {}) {
 
 /**
  * Full snapshot of the current balance state: effective total, paid
- * count, free count, and the free-pool expiry timestamp. Prefer this
- * over fetchBalance() when you need any field other than `balance`.
+ * count, free count, and the free-pool expiry timestamp.
  */
 export async function fetchBalanceSnapshot(opts = {}) {
   await fetchBalance(opts);
@@ -88,11 +133,9 @@ export async function consumeCredit(reason = 'sweep', sweepId = null) {
   });
   const data = await resp.json();
   if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
-  // The consume response carries pool info; mirror it into the cache
-  // so a subsequent render doesn't need a round-trip to reflect the
-  // decremented state.
   cachedBalance = {
     balance: data.newBalance,
+    paid: cachedBalance?.paid ?? 0,
     free: cachedBalance ? Math.max(0, (cachedBalance.free || 0) - (data.pool === 'free' ? 1 : 0)) : 0,
     freeExpiresAt: cachedBalance?.freeExpiresAt ?? null,
     _fetchedAt: Date.now(),

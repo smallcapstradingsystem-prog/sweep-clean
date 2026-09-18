@@ -20,12 +20,20 @@ const PUBLIC_RPCS = {
   solana:   'https://api.mainnet-beta.solana.com',
 };
 
-export function getProxyUrl() {
-  return PROXY_URL;
+const FETCH_TIMEOUT_MS = 15000;
+
+async function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-export function hasProxy() {
-  return PROXY_URL.length > 0;
+export function getProxyUrl() {
+  return PROXY_URL;
 }
 
 export function getRpcUrl(chain) {
@@ -37,7 +45,7 @@ export function getRpcUrl(chain) {
 
 export async function jsonRpc(chain, method, params = []) {
   const url = getRpcUrl(chain);
-  const resp = await fetch(url, {
+  const resp = await fetchWithTimeout(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
@@ -48,15 +56,11 @@ export async function jsonRpc(chain, method, params = []) {
   return json.result;
 }
 
-/**
- * Fetch ERC-20 token holdings for a wallet address.
- * Uses the Cloudflare proxy which calls alchemy_getTokenBalances.
- */
 export async function discoverTokens(chain, address) {
   if (!PROXY_URL) {
     return [];
   }
-  const resp = await fetch(`${PROXY_URL}/tokens/${chain}/${address}`);
+  const resp = await fetchWithTimeout(`${PROXY_URL}/tokens/${chain}/${address}`);
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ error: resp.statusText }));
     throw new Error(`token discovery failed: ${err.error || resp.status}`);
@@ -65,16 +69,10 @@ export async function discoverTokens(chain, address) {
   return json.tokens || [];
 }
 
-/**
- * Convenience: fetch USDC's decimals from the chain.
- */
 export async function getUsdcMetadata(chain, usdcAddress) {
   try {
     const result = await jsonRpc(chain, 'eth_call', [
-      {
-        to: usdcAddress,
-        data: '0x313ce567',
-      },
+      { to: usdcAddress, data: '0x313ce567' },
       'latest',
     ]);
     return { decimals: parseInt(result, 16) };

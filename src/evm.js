@@ -262,7 +262,11 @@ async function findBestQuote(quoter, tokenIn, tokenOut, amountIn, feeTiers) {
 async function ensureApproval(tokenContract, owner, spender, amount, signer) {
   const allowance = await tokenContract.allowance(owner, spender);
   if (allowance >= amount) return null;
-  return await tokenContract.connect(signer).approve(spender, ethers.MaxUint256);
+  // Approve the exact amount needed. MaxUint256 leaves a standing
+  // approval that survives the sweep, which is a security footgun for
+  // a wallet the user is about to abandon. One-shot approves cost a
+  // few extra cents of gas but don't leave a live approval behind.
+  return await tokenContract.connect(signer).approve(spender, amount);
 }
 
 function failureNote(failures) {
@@ -287,23 +291,44 @@ async function simulateSwap(router, params, signer) {
   }
 }
 
-/**
- * Estimate the USD value of a chain's preview by asking the Uniswap
- * Quoter what each token's full balance would net if swapped for USDC.
- *
- * - Uses the actual raw balance for each token, not 1 unit. This matches
- *   what the sweep will attempt and avoids under-pricing tokens whose
- *   unit value is tiny (e.g. memecoins).
- * - Skips tokens whose quote would be below MIN_SWAP_VALUE_USDC, because
- *   the sweep will skip those too. Keeps the estimate aligned with the
- *   sweep's behavior.
- * - Stablecoins (USDC, USDT, BUSD, DAI) are counted at face value.
- * - Native balance is priced via WETH → USDC using the full wrapped
- *   amount (minus a rough reserve for gas, matching computeReserve).
- * - Any token with no route counts as $0.
- *
- * @returns {Promise<number>}  estimated USD value
- */
+// =====================================================================
+// CONCURRENCY HELPER
+// =====================================================================
+
+async function runWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (true) {
+      const i = cursor++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  const workers = [];
+  for (let i = 0; i < Math.min(limit, items.length); i++) workers.push(worker());
+  await Promise.all(workers);
+  return results;
+}
+
+// =====================================================================
+// USD ESTIMATE for the auto-live threshold
+// =====================================================================
+//
+// Two behaviors differ from the previous version:
+//
+// 1. Native balance is priced MINUS the gas reserve the sweep leaves
+//    behind, not the raw balance. On Ethereum the reserve is 0.008
+//    ETH, so the old version overcounted by up to 5x on small wallets.
+//
+// 2. Per-token quotes are parallelized with a concurrency cap of 4,
+//    so a wallet with many tokens doesn't stall the estimate. The cap
+//    keeps us within RPC provider rate limits.
+//
+// Stablecoins are still priced at face value, and any token without
+// a route counts as $0 (fail-closed).
+// =====================================================================
+
 export async function estimateChainValueUsdc(chain, preview) {
   const cfg = CHAINS[chain];
   if (!cfg || !preview) return 0;
@@ -317,47 +342,42 @@ export async function estimateChainValueUsdc(chain, preview) {
 
   // ---- ERC-20 tokens ----
   const tokens = preview.tokens || [];
-  for (const t of tokens) {
+  const tokenQuotes = await runWithConcurrency(tokens, 4, async (t) => {
     const sym = (t.symbol || '').toUpperCase();
 
-    // Stablecoins count at face value.
     if (sym.includes('USD') || sym === 'DAI') {
       const amt = parseFloat(t.formatted || '0');
-      if (Number.isFinite(amt) && amt > 0) total += amt;
-      continue;
+      return Number.isFinite(amt) && amt > 0 ? amt : 0;
     }
 
-    // Quote the full balance for this token.
     let raw;
-    try {
-      raw = BigInt(t.raw || '0');
-    } catch {
-      continue;
-    }
-    if (raw <= 0n) continue;
+    try { raw = BigInt(t.raw || '0'); } catch { return 0; }
+    if (raw <= 0n) return 0;
 
     try {
       const best = await findBestQuote(quoter, t.address, usdc, raw, cfg.feeTiers);
-      if (!best) continue;                     // no route
-      if (best.out < MIN_SWAP_VALUE_USDC) continue;  // sweep will skip this
+      if (!best) return 0;
+      if (best.out < MIN_SWAP_VALUE_USDC) return 0;
       const usdcValue = Number(ethers.formatUnits(best.out, usdcDecimals));
-      if (Number.isFinite(usdcValue)) total += usdcValue;
+      return Number.isFinite(usdcValue) ? usdcValue : 0;
     } catch {
-      // Quoter failed for this token — treat as $0.
+      return 0;
     }
-  }
+  });
+  for (const v of tokenQuotes) total += v;
 
-  // ---- Native balance, priced via WETH → USDC ----
-  // Use the full native balance as an upper bound; the sweep reserves
-  // some for gas, so this can overcount by a few cents on expensive
-  // chains. Acceptable for a sponsorship floor.
+  // ---- Native balance, minus the reserve the sweep would leave ----
   if (preview.native && preview.native.raw && BigInt(preview.native.raw) > 0n) {
     try {
       const nativeBal = BigInt(preview.native.raw);
-      const best = await findBestQuote(quoter, cfg.weth, usdc, nativeBal, cfg.feeTiers);
-      if (best && best.out >= MIN_SWAP_VALUE_USDC) {
-        const usdcValue = Number(ethers.formatUnits(best.out, usdcDecimals));
-        if (Number.isFinite(usdcValue)) total += usdcValue;
+      const reserve = await computeReserve(chain, provider);
+      const sweepable = nativeBal > reserve ? nativeBal - reserve : 0n;
+      if (sweepable > 0n) {
+        const best = await findBestQuote(quoter, cfg.weth, usdc, sweepable, cfg.feeTiers);
+        if (best && best.out >= MIN_SWAP_VALUE_USDC) {
+          const usdcValue = Number(ethers.formatUnits(best.out, usdcDecimals));
+          if (Number.isFinite(usdcValue)) total += usdcValue;
+        }
       }
     } catch {
       // Skip native pricing on failure.
@@ -655,22 +675,26 @@ export async function sweepEvm(chain, signerOrWallet, opts = {}) {
     if (nativeBal <= minSwap) {
       // nothing
     } else if (dryRun) {
-      const quoter = new ethers.Contract(cfg.quoter, QUOTER_ABI, provider);
-      const best = await findBestQuote(quoter, cfg.weth, usdc, nativeBal, cfg.feeTiers);
-      if (!best) {
-        results.swaps.push({ symbol: nativeSym, status: 'NO_ROUTE', note: failureNote(findBestQuote.lastFailures) });
-      } else if (best.out < MIN_SWAP_VALUE_USDC) {
-        results.swaps.push({ symbol: nativeSym, status: 'SKIPPED', note: `value too low` });
-      } else {
-        results.swaps.push({
-          symbol: nativeSym,
-          amountIn: ethers.formatEther(nativeBal),
-          amountOutExpected: ethers.formatUnits(best.out, usdcDecimals),
-          feeTier: best.fee,
-          mode: SWAP_ENGINE === '0x' ? '0x' : 'uniswap',
-          status: 'DRY_RUN',
-        });
-        totalReceived += best.out;
+      const reserve = await computeReserve(chain, provider);
+      const sweepable = nativeBal > reserve ? nativeBal - reserve : 0n;
+      if (sweepable > minSwap) {
+        const quoter = new ethers.Contract(cfg.quoter, QUOTER_ABI, provider);
+        const best = await findBestQuote(quoter, cfg.weth, usdc, sweepable, cfg.feeTiers);
+        if (!best) {
+          results.swaps.push({ symbol: nativeSym, status: 'NO_ROUTE', note: failureNote(findBestQuote.lastFailures) });
+        } else if (best.out < MIN_SWAP_VALUE_USDC) {
+          results.swaps.push({ symbol: nativeSym, status: 'SKIPPED', note: `value too low` });
+        } else {
+          results.swaps.push({
+            symbol: nativeSym,
+            amountIn: ethers.formatEther(sweepable),
+            amountOutExpected: ethers.formatUnits(best.out, usdcDecimals),
+            feeTier: best.fee,
+            mode: SWAP_ENGINE === '0x' ? '0x' : 'uniswap',
+            status: 'DRY_RUN',
+          });
+          totalReceived += best.out;
+        }
       }
     } else {
       const reserve = await computeReserve(chain, provider);

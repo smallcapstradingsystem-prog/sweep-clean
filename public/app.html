@@ -121,10 +121,10 @@
             </p>
 
             <div id="dest-evm-wrap" class="dest-field">
-                <label for="dest-evm" class="dest-label">Destination (receives USDC on Ethereum)</label>
+                <label for="dest-evm" class="dest-label" id="dest-evm-label">Destination (receives USDC on Ethereum)</label>
                 <input id="dest-evm" type="text" placeholder="0x..." autocomplete="off" spellcheck="false">
-                <p class="hint" style="margin-top:6px; font-size: 12px;">
-                    Solana, Bitcoin, and TRON sweeps are bridged to Ethereum USDC and delivered here.
+                <p class="hint" style="margin-top:6px; font-size: 12px;" id="dest-evm-hint">
+                    EVM sweeps deliver USDC directly. Solana, Bitcoin, and TRON sweeps are bridged to Ethereum USDC and delivered here.
                 </p>
             </div>
 
@@ -161,17 +161,59 @@
                 <strong>Live mode:</strong> Real transactions will be broadcast. 1 credit will be consumed. Make sure your destination address is correct — this cannot be undone.
             </div>
 
-            <div class="alert alert-info" style="margin-top:12px; padding:10px 14px; background:rgba(56,139,253,0.1); border-left:3px solid #388bfd; border-radius:4px; font-size: 13px;">
-                <strong>No gas? No problem.</strong> Empty wallet with no ETH, POL, or BNB to move your tokens?
-                We sponsor the gas for you — the cost is deducted from your sweep as a small sponsorship fee.
-                You pay only if the sweep succeeds.
-            </div>
-
+			<div class="alert alert-info" style="margin-top:12px; padding:10px 14px; background:rgba(56,139,253,0.1); border-left:3px solid #388bfd; border-radius:4px; font-size: 13px;">
+				<strong>No gas? No problem.</strong> Empty wallet with no ETH, POL, BNB or TRON to move your tokens?
+				We sponsor the gas for you!.
+				You pay only if the sweep succeeds.
+			</div>
+			
             <div class="actions">
                 <button id="preview-button" class="btn btn-primary">Preview</button>
                 <button id="clear-button" class="btn btn-secondary">Clear</button>
                 <button id="run-button" class="btn btn-primary" style="display:none;">Run Dry Run</button>
             </div>
+        </section>
+
+        <section class="card" id="account-section">
+            <h2>Account</h2>
+            <p class="hint">
+                Your credits are tied to a client ID stored in this browser.
+                <strong>Save your client ID somewhere safe.</strong> If you clear your
+                browser data or switch devices, you'll need it to restore your credits.
+            </p>
+
+            <div class="account-current">
+                <div class="account-label">Current client ID</div>
+                <div class="account-id-row">
+                    <code id="account-client-id">—</code>
+                    <button id="account-copy-btn" class="copy-btn" type="button">Copy</button>
+                </div>
+            </div>
+
+            <details class="account-restore">
+                <summary>Restore from another client ID</summary>
+                <p class="hint" style="margin-top: 12px;">
+                    Paste a client ID to switch this browser to that identity.
+                    This will replace your current ID. Only use an ID you've saved
+                    from a previous session.
+                </p>
+                <input
+                    id="account-restore-input"
+                    type="text"
+                    placeholder="paste your client ID (48 hex characters)"
+                    autocomplete="off"
+                    spellcheck="false"
+                >
+                <div class="account-restore-actions">
+                    <button id="account-restore-btn" class="btn btn-primary" type="button">
+                        Verify and restore
+                    </button>
+                    <button id="account-restore-cancel" class="btn btn-secondary" type="button">
+                        Cancel
+                    </button>
+                </div>
+                <div id="account-restore-status" class="account-status" style="display: none;"></div>
+            </details>
         </section>
 
         <section class="card">
@@ -200,15 +242,15 @@
             <div class="footer-bottom">
                 <p>© 2026 Sweeper Labs. <a href="/">Home</a> · <a href="/guide.html">Guide</a> · <a href="/terms.html">Terms</a> · <a href="/privacy.html">Privacy</a> · <a href="/security-policy.html">Security</a></p>
                 <p style="font-size: 11px; color: #8b949e; margin-top: 12px;">
-                    Built 2026-09-18T05:55:56.431Z · bundle b30714b2a8f940e1d69ab8f70349d957f764f10bbcdc878118a58b82abe700da · 6223.8 KB
+                    Built 2026-09-18T09:10:31.048Z · bundle b9a21a9ca351b33434a31fee06bc468991f79c9f515d21845f86496e84d2ccf3 · 6229.8 KB
                 </p>
             </div>
         </div>
     </footer>
 
     <script>
-        window.__SWEEP_RELEASE__ = "b30714b2a8f940e1d69ab8f70349d957f764f10bbcdc878118a58b82abe700da".slice(0, 12);
+        window.__SWEEP_RELEASE__ = "b9a21a9ca351b33434a31fee06bc468991f79c9f515d21845f86496e84d2ccf3".slice(0, 12);
     </script>
-    <script src="app.js" integrity="sha384-gfBYUyJKgBNH3Vja7phTy6F/eIyctn/z5HqG3+wHojIqjdY9zZMhDx4SaYShK8Zz" crossorigin="anonymous"></script>
+    <script src="app.js" integrity="sha384-6KO9AoId/kZOZfLg3JXyuFfBro7EasUglG5UpC5BfDLOjoGYNXI5ibxSUNGADd8l" crossorigin="anonymous"></script>
 </body>
 </html>

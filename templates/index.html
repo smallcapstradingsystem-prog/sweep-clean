@@ -4,11 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sweeper — Consolidate Any Crypto Wallet Into USDC</title>
-    <meta name="description" content="Non-custodial cross-chain wallet sweeper. Consolidate any wallet into USDC. No gas, no problem — we sponsor it for a fee.">
+    <meta name="description" content="Non-custodial cross-chain wallet sweeper. Consolidate any wallet into USDC. No gas, no problem — we sponsor it for a small fee.">
     <meta name="theme-color" content="#0a0e1a">
 
     <meta property="og:title" content="Sweeper — Consolidate Any Crypto Wallet Into USDC">
-    <meta property="og:description" content="Non-custodial wallet sweeper. No gas, no problem — we sponsor it for a fee.">
+    <meta property="og:description" content="Non-custodial wallet sweeper. No gas, no problem — we sponsor it for a small fee.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://sweeper.cloud">
 
@@ -28,7 +28,7 @@
         </div>
     </nav>
 
-    <section class="promo-strip" id="promo-strip">
+    <section class="promo-strip" id="promo-strip" style="display:none;">
         <div class="wrap">
             <span class="promo-icon">🎁</span>
             <strong>Launch offer:</strong>
@@ -41,13 +41,12 @@
         <div class="wrap">
             <h1>Every wallet, every chain,<br><span class="muted">one destination.</span></h1>
             <img class="usdc-mark" src="/img/usdc.svg" alt="USDC">
-            
-			<p class="lede">
-				Consolidate any wallet into USDC. Sweep every token, every chain, every dust balance
-				into one place — a destination you choose with Sweeper.
-				<strong>Your keys never leave your browser.</strong>
-			</p>
-			
+            <p class="lede">
+                Consolidate any wallet into USDC. Sweep every token, every chain, every dust balance
+                into one place — a destination you choose with Sweeper.
+                <strong>Your keys never leave your browser.</strong>
+                Trusted by self-custody users.
+            </p>
             <p class="hero-subtag">NO GAS, NO PROBLEM. We sponsor it!</p>
 
             <div class="cta-row">
@@ -119,7 +118,7 @@
                 Empty wallet with nothing but USDC and no ETH, POL, or BNB to move it?
                 Most tools can't touch it — no gas, no move.
                 <strong>Sweeper sponsors the gas and sweeps it anyway.</strong>
-                You pay a small sponsorship fee only when the sweep succeeds.
+                A small fee is deducted from your sweep on success.
             </p>
             <div class="no-gas-grid">
                 <div class="no-gas-block">
@@ -130,7 +129,7 @@
                 <div class="no-gas-block">
                     <div class="no-gas-icon">💸</div>
                     <h3>Fee only if it works</h3>
-                    <p>The sponsorship fee is deducted from your sweep, not charged upfront. A failed sweep doesn't burn a credit or cost you anything.</p>
+                    <p>The small fee is deducted from your sweep, not charged upfront. A failed sweep doesn't burn a credit or cost you anything.</p>
                 </div>
                 <div class="no-gas-block">
                     <div class="no-gas-icon">🔓</div>
@@ -194,7 +193,7 @@
                     <p class="price-sub">$10.00 per sweep</p>
                     <ul>
                         <li>1 wallet live sweep</li>
-                        <li>EVM + Solana + Bitcoin + TRON, all chains</li>
+                        <li>Sweeps from EVM, Solana, Bitcoin, TRON</li>
                         <li>Unlimited token sweeps in each wallet</li>
                         <li>Gas sponsored for a small fee</li>
                         <li>Credits never expire</li>
@@ -208,7 +207,7 @@
                     <p class="price-sub">$4.00 per sweep</p>
                     <ul>
                         <li>5 wallets live sweeps</li>
-                        <li>EVM + Solana + Bitcoin + TRON, all chains</li>
+                        <li>Sweeps from EVM, Solana, Bitcoin, TRON</li>
                         <li>Unlimited token sweeps in each wallet</li>
                         <li>Gas sponsored for a small fee</li>
                         <li>Credits never expire</li>
@@ -224,7 +223,7 @@
                     <p class="price-sub">$4.00 per sweep</p>
                     <ul>
                         <li>10 wallets live sweeps</li>
-                        <li>EVM + Solana + Bitcoin + TRON, all chains</li>
+                        <li>Sweeps from EVM, Solana, Bitcoin, TRON</li>
                         <li>Unlimited token sweeps in each wallet</li>
                         <li>Gas sponsored for a small fee</li>
                         <li>Credits never expire</li>
@@ -239,7 +238,7 @@
                     <p class="price-sub">$3.20 per sweep</p>
                     <ul>
                         <li>25 wallets live sweeps</li>
-                        <li>EVM + Solana + Bitcoin + TRON, all chains</li>
+                        <li>Sweeps from EVM, Solana, Bitcoin, TRON</li>
                         <li>Unlimited token sweeps in each wallet</li>
                         <li>Gas sponsored for a small fee</li>
                         <li>Credits never expire</li>
@@ -253,7 +252,7 @@
                     <p class="price-sub">$3.00 per sweep</p>
                     <ul>
                         <li>50 wallets live sweeps</li>
-                        <li>EVM + Solana + Bitcoin + TRON, all chains</li>
+                        <li>Sweeps from EVM, Solana, Bitcoin, TRON</li>
                         <li>Unlimited token sweeps in each wallet</li>
                         <li>Gas sponsored for a small fee</li>
                         <li>Credits never expire</li>
@@ -263,8 +262,9 @@
             </div>
 
             <p class="pricing-note">
-                Credits are stored in your browser, keyed to a pseudonymous ID.
-                No account, no email. Pay with USDC, USDT, ETH, SOL, or BTC.
+                Credits are stored server-side, tied to a client ID in your browser.
+                No account, no email. Pay with USDC, USDT, ETH, SOL, or BTC —
+                including USDT on TRON.
             </p>
         </div>
     </section>
@@ -274,7 +274,7 @@
             <h2>FAQ</h2>
             <details>
                 <summary>What if my wallet has no gas?</summary>
-                <p><strong>No gas, no problem.</strong> If your wallet is empty of ETH, POL, BNB, or other native gas tokens, we sponsor the gas for you. The cost is deducted from your sweep as a small sponsorship fee — you never need to top up a wallet just to move what's in it.</p>
+                <p><strong>No gas, no problem.</strong> If your wallet is empty of ETH, POL, BNB, or other native gas tokens, we sponsor the gas for you. A small fee is deducted from your sweep on success — you never need to top up a wallet just to move what's in it.</p>
             </details>
             <details>
                 <summary>Do you ever see my seed phrase?</summary>
@@ -290,15 +290,15 @@
             </details>
             <details>
                 <summary>How do payments work?</summary>
-                <p>You pay in crypto — USDC, USDT, ETH, SOL, or BTC. Send the exact amount shown to the address we give you. Once the blockchain confirms it, your credit is issued automatically. No account, no email, no card.</p>
+                <p>You pay in crypto — USDC, USDT, ETH, SOL, or BTC. USDT on TRON is also supported. Send the exact amount shown to the address we give you. Once the blockchain confirms it, your credit is issued automatically. No account, no email, no card.</p>
             </details>
             <details>
                 <summary>Which chain should I pay on?</summary>
-                <p>USDC or USDT on Base is cheapest — usually under $0.01 in gas. Ethereum works too but costs more. Pick whichever is convenient; the credit is the same.</p>
+                <p>USDC or USDT on Base is cheapest — usually under $0.01 in gas. USDT on TRON is similarly cheap. Ethereum works too but costs more. Pick whichever is convenient; the credit is the same.</p>
             </details>
             <details>
                 <summary>What if I don't use my credits?</summary>
-                <p>They stay in your browser until you use them. No expiration, no fees.</p>
+                <p>They stay tied to your client ID until you use them. No expiration, no fees. Your client ID is stored in your browser — save it if you plan to clear browser data.</p>
             </details>
             <details>
                 <summary>What if a token has no route to USDC?</summary>
@@ -306,7 +306,7 @@
             </details>
             <details>
                 <summary>Can I use this with a hardware wallet?</summary>
-                <p>Yes, on EVM chains — Ledger (via WebHID) and Trezor are supported. Solana, Bitcoin, and TRON sweeping currently require a mnemonic or TronLink.</p>
+                <p>Yes, on EVM chains — Ledger (via WebHID) and Trezor are supported. Solana, Bitcoin, and TRON sweeping currently require a mnemonic, or TronLink in the case of TRON.</p>
             </details>
             <details>
                 <summary>Is this legal?</summary>
@@ -371,21 +371,50 @@
         var clientId = null;
         try { clientId = localStorage.getItem('sweep_client_id'); } catch (e) {}
 
-        if (!clientId || clientId.length < 16) return;
+        // Bug 4 + Bug 5: the strip starts hidden. We only show it if the
+        // user has no client ID (first-time visitor) OR the fetch below
+        // confirms they haven't claimed and don't have credits.
+        if (!clientId || !/^[a-f0-9]{16,}$/i.test(clientId)) {
+          strip.style.display = '';
+          return;
+        }
 
-        var WORKER_URL =
-          'https://sweep-payment.{%WORKER_SUBDOMAIN%}.workers.dev/credits/claim-info';
+        var BASE = 'https://sweep-payment.{%WORKER_SUBDOMAIN%}.workers.dev';
 
-        fetch(WORKER_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ clientId: clientId }),
-        })
-          .then(function (r) { return r.ok ? r.json() : null; })
-          .then(function (data) {
-            if (data && data.claimed) strip.style.display = 'none';
+        Promise.all([
+          fetch(BASE + '/credits/claim-info', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ clientId: clientId }),
           })
-          .catch(function () {});
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .catch(function () { return null; }),
+          fetch(BASE + '/credits/balance', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ clientId: clientId }),
+          })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .catch(function () { return null; }),
+        ])
+          .then(function (results) {
+            var claimInfo = results[0];
+            var balanceInfo = results[1];
+
+            var alreadyClaimed = claimInfo && claimInfo.claimed === true;
+            var hasCredits = balanceInfo && (balanceInfo.balance || 0) > 0;
+
+            if (alreadyClaimed || hasCredits) {
+              strip.style.display = 'none';
+            } else {
+              strip.style.display = '';
+            }
+          })
+          .catch(function () {
+            // Network error on both fetches — leave the strip hidden.
+            // Better to miss showing it once than to flash it to a
+            // returning customer.
+          });
       })();
     </script>
 </body>

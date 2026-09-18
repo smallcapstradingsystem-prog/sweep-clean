@@ -121,10 +121,10 @@
             </p>
 
             <div id="dest-evm-wrap" class="dest-field">
-                <label for="dest-evm" class="dest-label">Destination (receives USDC on Ethereum)</label>
+                <label for="dest-evm" class="dest-label" id="dest-evm-label">Destination (receives USDC on Ethereum)</label>
                 <input id="dest-evm" type="text" placeholder="0x..." autocomplete="off" spellcheck="false">
-                <p class="hint" style="margin-top:6px; font-size: 12px;">
-                    Solana, Bitcoin, and TRON sweeps are bridged to Ethereum USDC and delivered here.
+                <p class="hint" style="margin-top:6px; font-size: 12px;" id="dest-evm-hint">
+                    EVM sweeps deliver USDC directly. Solana, Bitcoin, and TRON sweeps are bridged to Ethereum USDC and delivered here.
                 </p>
             </div>
 
@@ -172,6 +172,48 @@
                 <button id="clear-button" class="btn btn-secondary">Clear</button>
                 <button id="run-button" class="btn btn-primary" style="display:none;">Run Dry Run</button>
             </div>
+        </section>
+
+        <section class="card" id="account-section">
+            <h2>Account</h2>
+            <p class="hint">
+                Your credits are tied to a client ID stored in this browser.
+                <strong>Save your client ID somewhere safe.</strong> If you clear your
+                browser data or switch devices, you'll need it to restore your credits.
+            </p>
+
+            <div class="account-current">
+                <div class="account-label">Current client ID</div>
+                <div class="account-id-row">
+                    <code id="account-client-id">—</code>
+                    <button id="account-copy-btn" class="copy-btn" type="button">Copy</button>
+                </div>
+            </div>
+
+            <details class="account-restore">
+                <summary>Restore from another client ID</summary>
+                <p class="hint" style="margin-top: 12px;">
+                    Paste a client ID to switch this browser to that identity.
+                    This will replace your current ID. Only use an ID you've saved
+                    from a previous session.
+                </p>
+                <input
+                    id="account-restore-input"
+                    type="text"
+                    placeholder="paste your client ID (48 hex characters)"
+                    autocomplete="off"
+                    spellcheck="false"
+                >
+                <div class="account-restore-actions">
+                    <button id="account-restore-btn" class="btn btn-primary" type="button">
+                        Verify and restore
+                    </button>
+                    <button id="account-restore-cancel" class="btn btn-secondary" type="button">
+                        Cancel
+                    </button>
+                </div>
+                <div id="account-restore-status" class="account-status" style="display: none;"></div>
+            </details>
         </section>
 
         <section class="card">

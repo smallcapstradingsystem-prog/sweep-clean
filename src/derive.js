@@ -14,10 +14,13 @@ const BTC_NETWORK = bitcoin.networks.bitcoin;
 const BITCOIN_PATH = "m/84'/0'/0'/0/0";
 const TRON_PATH = "m/44'/195'/0'/0/0";
 
+// Solana derivation paths we support. The user's wallet determines
+// which one matches; selectSolanaKeypair() picks the right one by
+// checking on-chain activity. Names are the wallets that use each
+// path, not claims about what those wallets do internally.
 const SOLANA_PATHS = {
-  phantom:    "m/44'/501'/0'/0'",
-  trust:      "m/44'/501'/0'",
-  ledgerLive: "m/44'/501'/0'/0'/0'",
+  phantom: "m/44'/501'/0'/0'",
+  solflare: "m/44'/501'/0'",
 };
 
 export function validateMnemonic(phrase) {
@@ -87,10 +90,6 @@ export function deriveBitcoin(phrase) {
  * TronWeb is imported lazily so this module stays importable in Node
  * (vitest) where tronweb's constructor would otherwise throw on
  * missing `window`/`localStorage`.
- *
- * Returns { address, privateKey, tronWeb } — tronWeb is a signing
- * instance already bound to the derived key, so the sweep can call
- * tronWeb.trx.sign() directly.
  */
 export async function deriveTron(phrase) {
   const clean = phrase.trim().replace(/\s+/g, ' ');
