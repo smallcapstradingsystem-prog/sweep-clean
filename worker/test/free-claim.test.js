@@ -143,8 +143,11 @@ describe('free claim', () => {
     ));
     expect(resp.body.offerExpired).toBe(true);
 
+    // releaseSlots() restores the pre-reserve value (0) rather than
+    // deleting the key. Asserting '0' documents that behavior; if
+    // releaseSlots is ever changed to delete, this test will catch it.
     const stored = await env.CREDITS.get(`free_claim:fp:${fp}`);
-    expect(stored).toBeNull();
+    expect(stored).toBe('0');
   });
 
   it('writes client_meta on a successful claim', async () => {

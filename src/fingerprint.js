@@ -63,19 +63,18 @@ function rawSignals() {
 }
 
 async function sha256Hex(input) {
-  // Browser path: Web Crypto is available on HTTPS or localhost.
-  if (typeof crypto !== 'undefined' && crypto.subtle) {
-    const buf = new TextEncoder().encode(input);
-    const hash = await crypto.subtle.digest('SHA-256', buf);
-    return Array.from(new Uint8Array(hash))
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('');
+  // Web Crypto is available in every browser on a secure context, and
+  // in Node 18+ as a global. No Node fallback needed — a dynamic
+  // import of 'node:crypto' broke the browser bundle, since esbuild
+  // tries to resolve it at build time.
+  if (typeof crypto === 'undefined' || !crypto.subtle) {
+    throw new Error('crypto.subtle unavailable');
   }
-
-  // Node fallback for tests. The dynamic import keeps the client
-  // bundle from trying to bundle node:crypto.
-  const { createHash } = await import('node:crypto');
-  return createHash('sha256').update(input).digest('hex');
+  const buf = new TextEncoder().encode(input);
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  return Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 /**
