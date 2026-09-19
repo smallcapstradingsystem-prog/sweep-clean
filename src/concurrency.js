@@ -39,7 +39,15 @@ export async function runWithConcurrency(items, limit, fn) {
 // typically rate-limit at 5-10 req/s per IP. If you switch to a
 // dedicated Alchemy/Helius plan, you can raise this. If you start
 // seeing 429s from the RPC proxy, lower it.
-export const ESTIMATE_CONCURRENCY = 4;
+//
+// Lowered from 4 to 2. The parallel findBestQuote in src/evm.js fires
+// up to 4 fee tiers per token at once. With 4 concurrent tokens, that
+// was 16 simultaneous RPC calls per preview batch, which combined with
+// 6 EVM chains × hundreds of dust tokens blew past the RPC proxy's
+// per-IP rate limit. 2 concurrent tokens halves the peak load without
+// noticeably slowing the estimate. If you ever raise the RPC proxy's
+// RATE_MAX significantly, this can go back to 4.
+export const ESTIMATE_CONCURRENCY = 2;
 
 // Alias for the preview loop's naming convention. Same value, same
 // intent — kept as a separate name because "preview" and "estimate"
