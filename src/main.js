@@ -92,6 +92,7 @@ import {
 import { scrubSecret } from './scrub.js';
 import { ChainVerifyError, verifySignerChain } from './chain-verify.js';
 import { getFingerprint } from './fingerprint.js';
+import { runWithConcurrency, PREVIEW_CONCURRENCY } from './concurrency.js';
 import {
   recordFeeWithRetry as recordFeeWithRetryCore,
   commitSweepWithRetry as commitSweepWithRetryCore,
