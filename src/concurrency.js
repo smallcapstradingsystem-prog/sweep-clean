@@ -47,7 +47,7 @@ export async function runWithConcurrency(items, limit, fn) {
 // per-IP rate limit. 2 concurrent tokens halves the peak load without
 // noticeably slowing the estimate. If you ever raise the RPC proxy's
 // RATE_MAX significantly, this can go back to 4.
-export const ESTIMATE_CONCURRENCY = 1;
+export const ESTIMATE_CONCURRENCY = 3;
 
 // Alias for the preview loop's naming convention. Same value, same
 // intent — kept as a separate name because "preview" and "estimate"
