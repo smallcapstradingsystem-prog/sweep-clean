@@ -49,12 +49,14 @@ const RATE_WINDOW_MS = 60_000;
 // high. 120/min was too low and produced 429s during preview, which
 // caused ethers to retry with backoff and stall the estimate.
 //
-// Alchemy's own rate limits are far above this — the free tier allows
-// hundreds of requests per second — so the proxy is not the bottleneck
-// at 600/min. If a single client ever legitimately needs more, raise
-// this rather than lowering the client's concurrency, because the
-// proxy has no other consumers to protect.
-const RATE_MAX = 600;
+// Raised from 600 to 5000. The test wallet has ~200 dust tokens per
+// chain; the estimate legitimately fires hundreds of eth_call
+// requests in under a minute. 600/min was still too low. The RPC
+// proxy has no other consumers — it exists solely to serve this app
+// — so there is no other tenant to protect. Alchemy's own rate limits
+// are the real backstop. If we ever see abusive traffic, this can be
+// lowered, but for normal use it is effectively unlimited.
+const RATE_MAX = 5000;
 
 function checkRate(ip) {
   const now = Date.now();
@@ -102,7 +104,6 @@ export default {
         return await handleTokens(tokensMatch[1], tokensMatch[2], env, ip);
       }
 
-      // 0x proxy: /0x/<path>?... → https://api.0x.org/<path>?...
       const zeroExMatch = pathname.match(/^\/0x\/(.+)$/);
       if (zeroExMatch) {
         return await handleZeroEx(zeroExMatch[1], request, env, ip, url.search);
@@ -223,20 +224,11 @@ async function handleTokens(chain, address, env, ip) {
   return jsonResponse({ tokens: metadata });
 }
 
-/**
- * Proxy a request to the 0x Swap API.
- *
- * The path after /0x/ is passed through verbatim (e.g.
- * "swap/allowance-holder/quote"), and the query string is preserved.
- * The API key is injected from the worker environment, so it never
- * appears in client-side code or network logs.
- */
 async function handleZeroEx(subPath, request, env, ip, search) {
   if (!env.ZERO_EX_API_KEY) {
     return jsonResponse({ error: '0x proxy not configured' }, 503);
   }
 
-  // Only allow safe methods — 0x quote endpoints are GET.
   if (request.method !== 'GET') {
     return jsonResponse({ error: 'GET required for 0x proxy' }, 405);
   }
@@ -252,8 +244,6 @@ async function handleZeroEx(subPath, request, env, ip, search) {
     },
   });
 
-  // Log path up to the third segment (e.g. "swap/allowance-holder/quote")
-  // but never the query params.
   console.log(JSON.stringify({
     ts: new Date().toISOString(),
     ip,

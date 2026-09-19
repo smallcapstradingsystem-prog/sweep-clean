@@ -9,7 +9,24 @@ import { FEE_WALLET_EVM, userShare, operatorFee } from './config.js';
 import { WORKER_SUBDOMAIN } from './env.js';
 import { runWithConcurrency, ESTIMATE_CONCURRENCY } from './concurrency.js';
 
-const SOL_MINT     = 'So11111111111111111111111111111111111111112';
+// Native SOL identifier. This is NOT the WSOL mint.
+//
+// deBridge distinguishes native SOL from WSOL, and the two use
+// different identifiers:
+//   - native SOL: 11111111111111111111111111111111
+//   - WSOL:       So11111111111111111111111111111111111111112
+//
+// When you pass the WSOL mint as srcChainTokenIn, deBridge treats the
+// order as a token transfer and expects the order authority to be a
+// WSOL Associated Token Account (not a wallet). Passing a wallet
+// address then fails with "not allowed account type" because a
+// System-owned wallet is not a token account.
+//
+// Passing the native SOL identifier instead tells deBridge to wrap SOL
+// internally as part of the transaction. The order authority is then
+// the wallet itself, which is what we want.
+const SOL_MINT = '11111111111111111111111111111111';
+
 const SOLANA_CHAIN = 7565164;
 const ETH_CHAIN    = 1;
 const ETH_USDC     = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
@@ -47,26 +64,22 @@ export function getConnection() {
 /**
  * Normalize a Solana address to its canonical base58 string form.
  *
- * deBridge's DLN API validates `srcChainOrderAuthorityAddress` by
- * looking it up on Solana mainnet and checking that the on-chain
- * account is a System-owned (ed25519 keypair) account. Passing the
- * address as a PublicKey object, or with any wrapper, produces the
- * "not allowed account type" 400 because the API expects a raw
- * base58 string it can pass directly to its RPC.
- *
- * This helper accepts either a PublicKey instance or a string and
- * always returns the canonical base58 form.
+ * deBridge's DLN API expects the authority address as a raw base58
+ * string. Passing a PublicKey object, or anything else, produces the
+ * "unexpected address representation" 400 because the API can't
+ * decode it. This helper accepts a PublicKey, a Keypair's publicKey,
+ * or a string, and always returns the canonical string form.
  */
 function toBase58(authority) {
   if (!authority) throw new Error('Solana authority address is required');
   if (typeof authority === 'string') {
-    // Validate by round-tripping through PublicKey. If the input is
-    // malformed, PublicKey throws here rather than at the deBridge
-    // call, which makes the error message clearer.
     return new PublicKey(authority).toBase58();
   }
   if (authority instanceof PublicKey) return authority.toBase58();
   if (typeof authority.toBase58 === 'function') return authority.toBase58();
+  if (typeof authority.toBuffer === 'function') {
+    return new PublicKey(authority.toBuffer()).toBase58();
+  }
   throw new Error(`Unsupported Solana authority type: ${typeof authority}`);
 }
 
@@ -100,8 +113,6 @@ export async function previewSolanaWallet(connection, walletAddress) {
 // =====================================================================
 
 export async function selectSolanaKeypair(connection, candidates, logLine) {
-  // Fire all signature lookups in parallel. Serial was 3x slower on
-  // wallets with multiple candidates.
   const checks = await Promise.all(candidates.map(async (c) => {
     try {
       const sigs = await connection.getSignaturesForAddress(
@@ -160,23 +171,30 @@ export async function selectSolanaKeypair(connection, candidates, logLine) {
 //
 //   /dln/order/create-tx
 //     ?srcChainId=7565164
-//     &srcChainTokenIn=<WSOL mint>            (native SOL uses the WSOL mint)
-//     &srcChainTokenInAmount=<lamports>
+//     &srcChainTokenIn=<native SOL or SPL mint>
+//     &srcChainTokenInAmount=<lamports or raw units>
 //     &dstChainId=1
 //     &dstChainTokenOut=<USDC on Ethereum>
 //     &dstChainTokenOutAmount=auto
 //     &dstChainTokenOutRecipient=<EVM fee wallet>
 //     &srcChainOrderAuthorityAddress=<user Solana wallet, base58>
 //     &dstChainOrderAuthorityAddress=<EVM fee wallet>
-//     &srcAllowedCancelBeneficiary=<user Solana wallet, base58>
 //
-// The last parameter is what the previous version was missing.
-// deBridge uses `srcAllowedCancelBeneficiary` as the refund authority
-// if the order is cancelled. When it's absent, the API falls back to
-// `srcChainOrderAuthorityAddress` and — depending on how the request
-// is formed — rejects the order if it can't confirm that address is a
-// System-owned (ed25519 keypair) account. Passing both fields with the
-// same base58 wallet string removes the ambiguity.
+// Two important details:
+//
+// 1. For native SOL, srcChainTokenIn MUST be the native SOL
+//    identifier 11111111111111111111111111111111, not the WSOL mint
+//    So11111111111111111111111111111111111111112. Passing WSOL
+//    makes deBridge look for a WSOL token account as the order
+//    authority, and reject the wallet address with "not allowed
+//    account type."
+//
+// 2. srcAllowedCancelBeneficiary is optional and omitted. If it's
+//    set, deBridge validates it with the same account-type check as
+//    the authority, and since our refund path is the same wallet
+//    address, setting it explicitly gains nothing and adds a second
+//    failure point. If a cancel needs to refund, deBridge falls back
+//    to srcChainOrderAuthorityAddress automatically.
 // =====================================================================
 
 async function createDebridgeOrder({ srcMint, amountRaw, srcAuthority }) {
@@ -192,7 +210,6 @@ async function createDebridgeOrder({ srcMint, amountRaw, srcAuthority }) {
     dstChainTokenOutRecipient: FEE_WALLET_EVM,
     srcChainOrderAuthorityAddress: authorityBase58,
     dstChainOrderAuthorityAddress: FEE_WALLET_EVM,
-    srcAllowedCancelBeneficiary: authorityBase58,
   });
 
   const resp = await fetchWithTimeout(`${DEBRIDGE_API}/dln/order/create-tx?${params}`, {
@@ -222,7 +239,6 @@ async function quoteDebridgeUsdcOut({ srcMint, amountRaw, srcAuthority }) {
     dstChainTokenOutRecipient: FEE_WALLET_EVM,
     srcChainOrderAuthorityAddress: authorityBase58,
     dstChainOrderAuthorityAddress: FEE_WALLET_EVM,
-    srcAllowedCancelBeneficiary: authorityBase58,
   });
 
   const resp = await fetchWithTimeout(`${DEBRIDGE_API}/dln/order/create-tx?${params}`, {
