@@ -150,6 +150,11 @@ const FREE_CLAIM_WINDOW_MS = 24 * 60 * 60 * 1000;
 const FREE_CLAIM_USE_WINDOW_MS = 24 * 60 * 60 * 1000;
 const FREE_CLAIM_START_TTL = 48 * 60 * 60;
 const FREE_CLAIM_GRANTED_TTL = 60 * 60 * 24 * 365;
+// Both caps are 2 claims per 7 days, and the two TTLs MUST match.
+// They are reserved and released as a pair in handleClaimFree, so a
+// client whose IP slot expires but whose fingerprint slot has not
+// (or vice versa) would have an inconsistent reservation state.
+// If you ever change one TTL, change the other to match.
 const FREE_CLAIM_IP_MAX = 2;
 const FREE_CLAIM_IP_TTL = 60 * 60 * 24 * 7;
 
@@ -849,7 +854,6 @@ export async function handleClaimInfo(request, env, cors) {
 
   const now = Date.now();
   const ipClaims = ipClaimsRaw ? parseInt(ipClaimsRaw, 10) : 0;
-  const blockedByIp = ipClaims >= FREE_CLAIM_IP_MAX;
 
   const freeAmount = free ? free.amount : 0;
   const useExpiresAt = free?.expiresAt || null;
@@ -859,10 +863,13 @@ export async function handleClaimInfo(request, env, cors) {
     useMsRemaining = Number.isFinite(ms) ? Math.max(0, ms - now) : 0;
   }
 
+  // A client that has already claimed is never "blocked" — it's done.
+  // Reporting the raw IP-quota state here would be misleading, because
+  // the client's own request would not be blocked by it.
   if (grantedRaw) {
     const startMs = startRaw ? new Date(startRaw).getTime() : null;
     return json({
-      ok: true, claimed: true, expired: false, blockedByIp, notStarted: false,
+      ok: true, claimed: true, expired: false, blockedByIp: false, notStarted: false,
       windowStart: startRaw || null,
       windowEnd: startMs ? new Date(startMs + FREE_CLAIM_WINDOW_MS).toISOString() : null,
       msRemaining: 0, creditsGranted: FREE_CLAIM_CREDITS,
@@ -870,6 +877,10 @@ export async function handleClaimInfo(request, env, cors) {
       freeAmount, useExpiresAt, useMsRemaining,
     }, 200, cors);
   }
+
+  // For a client that has NOT yet claimed, the IP quota is meaningful:
+  // it predicts whether their next claim would be blocked.
+  const blockedByIp = ipClaims >= FREE_CLAIM_IP_MAX;
 
   if (!startRaw) {
     return json({
@@ -895,6 +906,27 @@ export async function handleClaimInfo(request, env, cors) {
   }, 200, cors);
 }
 
+/**
+ * Grant free credits to a client, subject to three independent caps:
+ *
+ *   1. Per-clientId: once only. Enforced by free_claim:granted:{clientId}.
+ *   2. Per-IP:       FREE_CLAIM_IP_MAX per 7 days.
+ *   3. Per-fingerprint: FREE_CLAIM_FINGERPRINT_MAX per 7 days.
+ *
+ * The IP and fingerprint counters are incremented with a KV
+ * read-modify-write, which is NOT atomic. Two concurrent requests from
+ * the same IP can both read `n` and both write `n+1`, netting only one
+ * increment. This is acceptable: the caps are soft limits intended to
+ * blunt trivial farming, not to enforce a hard quota. Do not rely on
+ * them for billing or security decisions. Making them hard would
+ * require a Durable Object.
+ *
+ * On any failure path — window expired, exception during the grant —
+ * the counters are decremented back via `releaseSlots`. There is a
+ * narrow window between the increment and the release where a crash
+ * would leave the counter permanently incremented. The window is one
+ * KV round-trip, and the impact is +1 on a soft cap. Not corrected.
+ */
 export async function handleClaimFree(request, env, cors) {
   const { clientId, fingerprint } = await request.json();
   if (!clientId || typeof clientId !== 'string' || clientId.length < 16) {
@@ -913,6 +945,7 @@ export async function handleClaimFree(request, env, cors) {
   const ipKey = `free_claim:ip:${ip}`;
   const fpKey = `free_claim:fp:${fp}`;
 
+  // ---- Fast path: already claimed ----
   const grantedRaw = await env.CREDITS.get(grantedKey);
   if (grantedRaw) {
     const { effective } = await getEffectiveBalance(env, clientId);
@@ -922,6 +955,7 @@ export async function handleClaimFree(request, env, cors) {
     }, 200, cors);
   }
 
+  // ---- Check IP cap ----
   const ipClaimsRaw = await env.CREDITS.get(ipKey);
   const ipClaims = ipClaimsRaw ? parseInt(ipClaimsRaw, 10) : 0;
   if (ipClaims >= FREE_CLAIM_IP_MAX) {
@@ -933,6 +967,7 @@ export async function handleClaimFree(request, env, cors) {
     }, 200, cors);
   }
 
+  // ---- Check fingerprint cap ----
   const fpClaimsRaw = await env.CREDITS.get(fpKey);
   const fpClaims = fpClaimsRaw ? parseInt(fpClaimsRaw, 10) : 0;
   if (fpClaims >= FREE_CLAIM_FINGERPRINT_MAX) {
@@ -944,6 +979,8 @@ export async function handleClaimFree(request, env, cors) {
     }, 200, cors);
   }
 
+  // ---- Reserve both slots ----
+  // Not atomic. See the doc comment above for why that's acceptable.
   await env.CREDITS.put(ipKey, String(ipClaims + 1), {
     expirationTtl: FREE_CLAIM_IP_TTL,
   });
@@ -960,6 +997,7 @@ export async function handleClaimFree(request, env, cors) {
     }).catch(() => {});
   };
 
+  // ---- Window check ----
   const startRaw = await env.CREDITS.get(startKey);
   if (startRaw) {
     const windowStart = new Date(startRaw).getTime();
@@ -977,9 +1015,14 @@ export async function handleClaimFree(request, env, cors) {
     });
   }
 
+  // ---- Grant ----
   const grantedAtMs = now;
   const preGrant = await getEffectiveBalance(env, clientId);
 
+  // The grant and the metadata write are in the same try block, so a
+  // failure in either releases the slots and returns no partial state.
+  // In particular: if writeFreeCredits succeeds but the metadata write
+  // fails, we want the whole thing to look like it didn't happen.
   try {
     await writeFreeCredits(env, clientId, FREE_CLAIM_CREDITS, grantedAtMs);
 
@@ -997,17 +1040,17 @@ export async function handleClaimFree(request, env, cors) {
       expiresAt: new Date(grantedAtMs + FREE_CLAIM_USE_WINDOW_MS).toISOString(),
     });
     await env.CREDITS.put(`history:${clientId}`, JSON.stringify(history.slice(0, 50)));
+
+    await env.CREDITS.put(`client_meta:${clientId}`, JSON.stringify({
+      fingerprint: fp || null,
+      ip,
+      host: request.headers.get('host') || 'unknown',
+      firstSeen: new Date(now).toISOString(),
+    }), { expirationTtl: 60 * 60 * 24 * 365 });
   } catch (e) {
     await releaseSlots();
     throw e;
   }
-
-  await env.CREDITS.put(`client_meta:${clientId}`, JSON.stringify({
-    fingerprint: fp || null,
-    ip,
-    host: request.headers.get('host') || 'unknown',
-    firstSeen: new Date(now).toISOString(),
-  }), { expirationTtl: 60 * 60 * 24 * 365 }).catch(() => {});
 
   await env.CREDITS.put(grantedKey, new Date().toISOString(), {
     expirationTtl: FREE_CLAIM_GRANTED_TTL,
@@ -1745,6 +1788,19 @@ export async function handleAdminCreditsList(request, env, cors) {
   }, 200, cors);
 }
 
+/**
+ * Find every client whose client_meta record has a matching fingerprint.
+ *
+ * Cloudflare KV's list() returns at most 1000 keys per call. We page
+ * through the cursor until list_complete is true, with a hard cap of
+ * 10 pages (10,000 keys) so a runaway list cannot hang the worker. If
+ * the cap is hit, the response carries `truncated: true` so the
+ * operator knows the result may be incomplete.
+ *
+ * At ~10k clients this starts to be slow (one KV get per key). If it
+ * becomes a problem, add a reverse index: at claim time, push the
+ * clientId onto `fp_index:{fingerprint}`. Lookups become a single read.
+ */
 export async function handleAdminClientLookupByFingerprint(request, env, cors) {
   const ip = request.headers.get('cf-connecting-ip') || 'unknown';
   await requireAdmin(request, env, ip);
@@ -1755,22 +1811,47 @@ export async function handleAdminClientLookupByFingerprint(request, env, cors) {
     return json({ error: 'fingerprint required' }, 400, cors);
   }
 
-  const listed = await env.CREDITS.list({ prefix: 'client_meta:', limit: 1000 });
-  const matches = [];
+  const MAX_PAGES = 10;
+  const PAGE_SIZE = 1000;
 
-  for (const key of listed.keys) {
-    const clientId = key.name.slice('client_meta:'.length);
-    const raw = await env.CREDITS.get(key.name);
-    if (!raw) continue;
-    let meta;
-    try { meta = JSON.parse(raw); } catch { continue; }
-    if (meta.fingerprint === fingerprint) {
-      const { effective } = await getEffectiveBalance(env, clientId);
-      matches.push({ clientId, balance: effective, ...meta });
+  const matches = [];
+  let cursor = undefined;
+  let pages = 0;
+
+  while (pages < MAX_PAGES) {
+    const listed = await env.CREDITS.list({
+      prefix: 'client_meta:',
+      limit: PAGE_SIZE,
+      cursor,
+    });
+
+    for (const key of listed.keys) {
+      const clientId = key.name.slice('client_meta:'.length);
+      const raw = await env.CREDITS.get(key.name);
+      if (!raw) continue;
+      let meta;
+      try { meta = JSON.parse(raw); } catch { continue; }
+      if (meta.fingerprint === fingerprint) {
+        const { effective } = await getEffectiveBalance(env, clientId);
+        matches.push({ clientId, balance: effective, ...meta });
+      }
     }
+
+    pages++;
+    if (listed.list_complete) break;
+    cursor = listed.cursor;
+    if (!cursor) break;  // Defensive: list_complete false with no cursor.
   }
 
-  return json({ ok: true, fingerprint, count: matches.length, matches }, 200, cors);
+  const truncated = pages >= MAX_PAGES && !!cursor;
+
+  return json({
+    ok: true,
+    fingerprint,
+    count: matches.length,
+    truncated,
+    matches,
+  }, 200, cors);
 }
 
 // =====================================================================

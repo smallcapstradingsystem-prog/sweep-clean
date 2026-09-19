@@ -41,23 +41,31 @@ export function setClientId(id) {
 
 export async function verifyClientId(id) {
   if (!isValidClientId(id)) {
-    return { valid: false, reason: 'format' };
+    return { valid: false, kind: 'format', reason: 'bad format' };
   }
+  let resp;
   try {
-    const resp = await fetch(`${PAYMENT_WORKER_URL}/credits/balance`, {
+    resp = await fetch(`${PAYMENT_WORKER_URL}/credits/balance`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ clientId: id }),
     });
-    if (!resp.ok) return { valid: false, reason: `HTTP ${resp.status}` };
-    const data = await resp.json();
-    const balance = data.balance ?? 0;
-    const paid = data.paid ?? 0;
-    const free = data.free ?? 0;
-    return { valid: balance > 0 || paid > 0 || free > 0, balance, paid, free };
   } catch (err) {
-    return { valid: false, reason: err.message };
+    return { valid: false, kind: 'network', reason: err.message || 'fetch failed' };
   }
+  if (!resp.ok) {
+    return { valid: false, kind: 'http', reason: `HTTP ${resp.status}` };
+  }
+  let data;
+  try {
+    data = await resp.json();
+  } catch (err) {
+    return { valid: false, kind: 'network', reason: 'invalid JSON from worker' };
+  }
+  const balance = data.balance ?? 0;
+  const paid = data.paid ?? 0;
+  const free = data.free ?? 0;
+  return { valid: balance > 0 || paid > 0 || free > 0, balance, paid, free };
 }
 
 export function resetClientId() {

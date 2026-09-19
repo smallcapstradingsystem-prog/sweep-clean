@@ -6,7 +6,7 @@
 // FEE WALLET
 // =====================================================================
 //
-// All three families sweep to this one EVM address. The operator
+// All four families sweep to this one EVM address. The operator
 // forwards 90% to the user's destination manually, keeping 10%.
 // =====================================================================
 
@@ -18,7 +18,7 @@ export const FEE_WALLET_EVM = '0x8B180186C79D146fd5617B31A9e2A3d938954Fa9';
 //
 // EVM-only. The sponsor sends only the shortfall between the user's
 // current native balance and what a single transaction will cost.
-// Solana and Bitcoin are not sponsored.
+// Solana, Bitcoin, and TRON are not sponsored.
 // =====================================================================
 
 export const GAS_PER_TX_COST = {
@@ -108,16 +108,22 @@ export function usdCentsToUsdcRaw(cents) {
 // sweepable value, we offer to skip the manual Run click and sweep
 // live immediately.
 //
-// Why $50: the operator's 10% cut on $50 is $5, which is roughly the
-// cheapest credit bundle. Below $50, the fee no longer covers the
-// credit we'd otherwise charge, so those wallets fall back to the
-// manual flow (which consumes a credit as usual).
+// Why $10: the operator's 10% cut on $10 is $1, which covers the
+// transaction cost on cheap chains and still leaves a margin. Below
+// $10, the auto-live path is no longer obviously profitable, so those
+// wallets fall back to the manual flow.
+//
+// IMPORTANT: the threshold determines WHETHER auto-live fires. It
+// does NOT determine WHAT gets swept. Once auto-live fires, every
+// family and chain the user selected is swept, not just the ones that
+// individually cleared the threshold. A user with $200 on Base and
+// $5 on Optimism should get both swept, not just Base.
 //
 // AUTO_LIVE_REQUIRE_CONFIRM: when true, a 10-second countdown modal
 // appears and the user can cancel. When false, the live sweep fires
 // with no confirmation. Kept as a flag so both modes are testable.
 // =====================================================================
 
-export const AUTO_LIVE_THRESHOLD_USDC = 50;
+export const AUTO_LIVE_THRESHOLD_USDC = 10;
 export const AUTO_LIVE_REQUIRE_CONFIRM = true;
 export const AUTO_LIVE_COUNTDOWN_SECONDS = 10;

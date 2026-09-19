@@ -2,6 +2,7 @@ import { Connection, PublicKey, VersionedTransaction } from '@solana/web3.js';
 import { getAssociatedTokenAddress, getAccount, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
 import { FEE_WALLET_EVM, userShare, operatorFee } from './config.js';
 import { WORKER_SUBDOMAIN } from './env.js';
+import { runWithConcurrency, ESTIMATE_CONCURRENCY } from './concurrency.js';
 
 const SOL_MINT     = 'So11111111111111111111111111111111111111112';
 const SOLANA_CHAIN = 7565164;
@@ -23,8 +24,6 @@ const KNOWN_STABLE_MINTS = new Set([
   'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
   'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',
 ]);
-
-const ESTIMATE_CONCURRENCY = 4;
 
 async function fetchWithTimeout(url, options = {}) {
   const controller = new AbortController();
@@ -251,26 +250,6 @@ export async function estimateSolanaValueUsdc(preview) {
   }
 
   return total;
-}
-
-async function runWithConcurrency(items, limit, fn) {
-  const results = new Array(items.length);
-  let cursor = 0;
-
-  async function worker() {
-    while (true) {
-      const i = cursor++;
-      if (i >= items.length) return;
-      results[i] = await fn(items[i], i);
-    }
-  }
-
-  const workers = [];
-  for (let i = 0; i < Math.min(limit, items.length); i++) {
-    workers.push(worker());
-  }
-  await Promise.all(workers);
-  return results;
 }
 
 // =====================================================================

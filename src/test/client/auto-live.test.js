@@ -16,16 +16,16 @@ import {
  * IMPORTANT: isEligible takes exactly ONE parameter. If it took a
  * second optional `threshold`, Array.prototype.filter would pass the
  * element INDEX as that second argument, and the comparison would be
- * against 0, 1, 2, ... instead of $50. That footgun shipped once; the
- * signature stays unary on purpose.
+ * against 0, 1, 2, ... instead of the real threshold. That footgun
+ * shipped once; the signature stays unary on purpose.
  */
 function isEligible(value) {
   return (value || 0) >= AUTO_LIVE_THRESHOLD_USDC;
 }
 
 describe('auto-live thresholds', () => {
-  it('threshold is 50', () => {
-    expect(AUTO_LIVE_THRESHOLD_USDC).toBe(50);
+  it('threshold is 10', () => {
+    expect(AUTO_LIVE_THRESHOLD_USDC).toBe(10);
   });
 
   it('require-confirm defaults to true', () => {
@@ -37,16 +37,16 @@ describe('auto-live thresholds', () => {
     expect(AUTO_LIVE_COUNTDOWN_SECONDS).toBeGreaterThan(0);
   });
 
-  it('marks 49.99 as not eligible', () => {
-    expect(isEligible(49.99)).toBe(false);
+  it('marks 9.99 as not eligible', () => {
+    expect(isEligible(9.99)).toBe(false);
   });
 
-  it('marks 50.00 as eligible', () => {
-    expect(isEligible(50)).toBe(true);
+  it('marks 10.00 as eligible', () => {
+    expect(isEligible(10)).toBe(true);
   });
 
-  it('marks 50.01 as eligible', () => {
-    expect(isEligible(50.01)).toBe(true);
+  it('marks 10.01 as eligible', () => {
+    expect(isEligible(10.01)).toBe(true);
   });
 
   it('treats missing values as not eligible', () => {
@@ -55,14 +55,14 @@ describe('auto-live thresholds', () => {
     expect(isEligible(0)).toBe(false);
   });
 
-  it('per-wallet: three wallets at $49 do not trigger on aggregate', () => {
-    const perWallet = [49, 49, 49];
+  it('per-wallet: three wallets at $9 do not trigger on aggregate', () => {
+    const perWallet = [9, 9, 9];
     const eligible = perWallet.filter(isEligible);
     expect(eligible).toHaveLength(0);
   });
 
-  it('per-wallet: one wallet at $50 among $49s triggers', () => {
-    const perWallet = [49, 50, 49];
+  it('per-wallet: one wallet at $10 among $9s triggers', () => {
+    const perWallet = [9, 10, 9];
     const eligible = perWallet.filter(isEligible);
     expect(eligible).toHaveLength(1);
   });

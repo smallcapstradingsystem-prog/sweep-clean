@@ -207,15 +207,52 @@ function renderPendingCard(item) {
     }
   }
 
-  const actions = el('div', { class: 'actions' });
-  actions.appendChild(el('button', {
+  // ---- Inline forward form ----
+  //
+  // Previously this used window.prompt(), which is blocked in some
+  // embedded contexts and gives the operator no way to review what
+  // they typed. Now it's a small inline form: two inputs, a save
+  // button, and a status line. The form collapses to a "Mark
+  // forwarded" button until clicked.
+
+  const formWrap = el('div', { class: 'actions' });
+
+  const openBtn = el('button', {
     class: 'btn btn-primary btn-sm',
     text: 'Mark forwarded',
+  });
+  formWrap.appendChild(openBtn);
+
+  const form = el('div', { class: 'forward-form', style: 'display:none; margin-top: 12px;' });
+
+  const txInput = el('input', {
+    id: `tx-${item.sweepId}`,
+    type: 'text',
+    placeholder: 'Transaction hashes (comma-separated, optional)',
+    autocomplete: 'off',
+  });
+  const noteInput = el('input', {
+    id: `note-${item.sweepId}`,
+    type: 'text',
+    placeholder: 'Optional note',
+    autocomplete: 'off',
+  });
+  const status = el('div', { class: 'result' });
+
+  const saveBtn = el('button', {
+    class: 'btn btn-primary btn-sm',
+    text: 'Confirm',
     onclick: async () => {
-      const txHashesRaw = prompt('Transaction hashes (comma-separated, or leave blank):', '');
-      if (txHashesRaw === null) return;
-      const txHashes = txHashesRaw.split(',').map((s) => s.trim()).filter(Boolean);
-      const note = prompt('Optional note:', '') || '';
+      const txHashesRaw = txInput.value.trim();
+      const txHashes = txHashesRaw
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const note = noteInput.value.trim();
+
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving…';
+      status.innerHTML = '';
 
       try {
         await apiCall('/fee/mark-forwarded', {
@@ -223,13 +260,46 @@ function renderPendingCard(item) {
           body: { sweepId: item.sweepId, txHashes, note },
         });
         card.classList.add('done');
-        card.appendChild(el('p', { class: 'success', text: 'Marked as forwarded.' }));
+        status.appendChild(el('p', { class: 'success', text: 'Marked as forwarded.' }));
       } catch (err) {
-        showError(card, err);
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Confirm';
+        showError(status, err);
       }
     },
-  }));
-  card.appendChild(actions);
+  });
+
+  const cancelBtn = el('button', {
+    class: 'btn btn-secondary btn-sm',
+    text: 'Cancel',
+    onclick: () => {
+      form.style.display = 'none';
+      formWrap.style.display = '';
+      status.innerHTML = '';
+      txInput.value = '';
+      noteInput.value = '';
+    },
+  });
+
+  form.appendChild(el('div', { class: 'field' }, [
+    el('label', { for: `tx-${item.sweepId}`, text: 'Transaction hashes' }),
+    txInput,
+  ]));
+  form.appendChild(el('div', { class: 'field' }, [
+    el('label', { for: `note-${item.sweepId}`, text: 'Note' }),
+    noteInput,
+  ]));
+  form.appendChild(el('div', { class: 'actions' }, [saveBtn, cancelBtn]));
+  form.appendChild(status);
+
+  openBtn.addEventListener('click', () => {
+    formWrap.style.display = 'none';
+    form.style.display = '';
+    txInput.focus();
+  });
+
+  card.appendChild(formWrap);
+  card.appendChild(form);
 
   return card;
 }
@@ -423,7 +493,8 @@ async function renderFingerprintLookup(content) {
           body: { fingerprint },
         });
         result.innerHTML = '';
-        result.appendChild(el('p', { text: `${data.count} match${data.count === 1 ? '' : 'es'}` }));
+        const countText = `${data.count} match${data.count === 1 ? '' : 'es'}${data.truncated ? ' (truncated — more may exist)' : ''}`;
+        result.appendChild(el('p', { text: countText }));
 
         if (data.matches.length === 0) return;
 

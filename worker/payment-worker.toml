@@ -6,3 +6,27 @@ kv_namespaces = [
   { binding = "CREDITS", id = "dbce7fee39a04e1191e2337e8533ce13" },
   { binding = "PENDING_PAYMENTS", id = "523b202a4d764d0f8b96c7dc367cd495" }
 ]
+
+# ---------------------------------------------------------------------
+# MIGRATION: cleanup-credits-do
+# ---------------------------------------------------------------------
+#
+# A previous deployment of this worker (from an earlier version of the
+# project) defined a Durable Object class named `Credits`. The current
+# code uses KV only and does not export that class, so Cloudflare's
+# deploy reconciliation fails with:
+#
+#   New version of script does not export class 'Credits' which is
+#   depended on by existing Durable Objects.
+#
+# This migration tells Cloudflare to delete the orphaned DO namespace
+# and any objects stored in it.
+#
+# IMPORTANT: Migration tags are one-shot. Once this deploy succeeds,
+# delete this [[migrations]] block before any subsequent deploy.
+# Reusing the same tag will fail.
+#
+# If you are not certain the Credits DO is orphaned — i.e. if some
+# other worker on this Cloudflare account still binds to it — do NOT
+# deploy this file. Check the dashboard first.
+# ---------------------------------------------------------------------

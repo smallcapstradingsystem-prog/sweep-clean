@@ -42,12 +42,12 @@ describe('handleCryptoQuote', () => {
     expect(resp.body.token).toBe('USDC');
     expect(resp.body.address).toBe(env.CRYPTO_ADDRESS_EVM);
     expect(resp.body.credits).toBe(1);
-    expect(resp.body.usd_price).toBe(5.00);
+    expect(resp.body.usd_price).toBe(10.00);
     expect(resp.body.decimals).toBe(6);
     expect(resp.body.payment_id).toMatch(/[0-9a-f-]{36}/);
-    // Unique-suffix mechanism: amount is slightly above the exact 5 USDC.
-    expect(Number(resp.body.amount)).toBeGreaterThanOrEqual(5.0);
-    expect(Number(resp.body.amount)).toBeLessThan(5.01);
+    // Unique-suffix mechanism: amount is slightly above the exact 10 USDC.
+    expect(Number(resp.body.amount)).toBeGreaterThanOrEqual(10.0);
+    expect(Number(resp.body.amount)).toBeLessThan(10.01);
   });
 
   it('persists the pending payment record', async () => {
@@ -76,11 +76,11 @@ describe('handleCryptoQuote', () => {
     expect(resp.body.token).toBe('USDC');
     expect(resp.body.decimals).toBe(18);
     expect(resp.body.chain).toBe('bnb');
-    // 5 USDC + a random suffix, expressed with 18 decimals.
+    // 10 USDC + a random suffix, expressed with 18 decimals.
     const raw = BigInt(resp.body.amount_raw);
-    const fiveE18 = 5n * 10n ** 18n;
-    expect(raw).toBeGreaterThanOrEqual(fiveE18);
-    expect(raw).toBeLessThan(fiveE18 + 10000n);
+    const tenE18 = 10n * 10n ** 18n;
+    expect(raw).toBeGreaterThanOrEqual(tenE18);
+    expect(raw).toBeLessThan(tenE18 + 10n ** 16n);
   });
 
   it('handles native ETH via CoinGecko', async () => {
@@ -93,9 +93,9 @@ describe('handleCryptoQuote', () => {
     expect(resp.status).toBe(200);
     expect(resp.body.token).toBe('ETH');
     expect(resp.body.decimals).toBe(18);
-    // $5 of ETH at $3000 = 0.00167 ETH (plus suffix).
+    // $10 of ETH at $3000 = 0.00333 ETH (plus suffix).
     const raw = BigInt(resp.body.amount_raw);
-    const expected = 5n * 10n ** 18n / 3000n; // 5/3000 ETH in wei
+    const expected = 10n * 10n ** 18n / 3000n; // 10/3000 ETH in wei
     expect(raw).toBeGreaterThanOrEqual(expected);
   });
 

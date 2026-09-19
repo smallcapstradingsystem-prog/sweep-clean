@@ -2,6 +2,7 @@ import { ethers } from 'ethers';
 import { getRpcUrl, discoverTokens } from './rpc.js';
 import { FEE_WALLET_EVM, userShare, operatorFee } from './config.js';
 import { WORKER_SUBDOMAIN } from './env.js';
+import { runWithConcurrency, ESTIMATE_CONCURRENCY } from './concurrency.js';
 
 // =====================================================================
 // SWAP ENGINE SELECTION
@@ -239,24 +240,54 @@ export async function previewWallet(chain, walletAddress) {
   return result;
 }
 
+/**
+ * Find the best Uniswap quote for a token → USDC swap.
+ *
+ * All fee tiers are queried in parallel. Previously they were queried
+ * sequentially, which meant a token with no pool paid the full cost of
+ * four failed eth_call round-trips before being marked NO_ROUTE. On
+ * wallets with many dust tokens that compounded into minutes of
+ * estimation time. Parallel means one round-trip's worth of latency
+ * regardless of how many tiers exist, and the best (highest out)
+ * result still wins.
+ *
+ * The RPC proxy has a per-IP rate limit of 120 req/min. With
+ * ESTIMATE_CONCURRENCY = 4 tokens in flight and up to 4 fee tiers per
+ * token, that's ~16 concurrent requests per batch — under the limit,
+ * but close enough that a rate-limit warning here means tuning
+ * ESTIMATE_CONCURRENCY down.
+ *
+ * Failures across all tiers are collected and exposed on
+ * `findBestQuote.lastFailures` for the caller to report as a
+ * NO_ROUTE note.
+ */
 async function findBestQuote(quoter, tokenIn, tokenOut, amountIn, feeTiers) {
-  let best = null;
-  const failures = [];
+  const settled = await Promise.all(
+    feeTiers.map(async (fee) => {
+      try {
+        const q = await quoter.quoteExactInputSingle.staticCall({
+          tokenIn, tokenOut, amountIn, fee, sqrtPriceLimitX96: 0,
+        });
+        const out = q[0] ?? q.amountOut;
+        if (out === undefined || out === null) {
+          return { fee, out: null, reason: 'no amountOut in response' };
+        }
+        return { fee, out };
+      } catch (e) {
+        return { fee, out: null, reason: shortError(e) };
+      }
+    })
+  );
 
-  for (const fee of feeTiers) {
-    try {
-      const q = await quoter.quoteExactInputSingle.staticCall({
-        tokenIn, tokenOut, amountIn, fee, sqrtPriceLimitX96: 0,
-      });
-      const out = q[0] ?? q.amountOut;
-      if (!best || out > best.out) best = { fee, out };
-    } catch (e) {
-      failures.push({ fee, reason: shortError(e) });
-    }
+  const successes = settled.filter((r) => r.out !== null && r.out !== undefined);
+  if (successes.length === 0) {
+    findBestQuote.lastFailures = settled.map((r) => ({ fee: r.fee, reason: r.reason }));
+    return null;
   }
 
-  findBestQuote.lastFailures = best ? null : failures;
-  return best;
+  successes.sort((a, b) => (b.out > a.out ? 1 : b.out < a.out ? -1 : 0));
+  findBestQuote.lastFailures = null;
+  return successes[0];
 }
 
 async function ensureApproval(tokenContract, owner, spender, amount, signer) {
@@ -292,26 +323,6 @@ async function simulateSwap(router, params, signer) {
 }
 
 // =====================================================================
-// CONCURRENCY HELPER
-// =====================================================================
-
-async function runWithConcurrency(items, limit, fn) {
-  const results = new Array(items.length);
-  let cursor = 0;
-  async function worker() {
-    while (true) {
-      const i = cursor++;
-      if (i >= items.length) return;
-      results[i] = await fn(items[i], i);
-    }
-  }
-  const workers = [];
-  for (let i = 0; i < Math.min(limit, items.length); i++) workers.push(worker());
-  await Promise.all(workers);
-  return results;
-}
-
-// =====================================================================
 // USD ESTIMATE for the auto-live threshold
 // =====================================================================
 //
@@ -342,7 +353,7 @@ export async function estimateChainValueUsdc(chain, preview) {
 
   // ---- ERC-20 tokens ----
   const tokens = preview.tokens || [];
-  const tokenQuotes = await runWithConcurrency(tokens, 4, async (t) => {
+  const tokenQuotes = await runWithConcurrency(tokens, ESTIMATE_CONCURRENCY, async (t) => {
     const sym = (t.symbol || '').toUpperCase();
 
     if (sym.includes('USD') || sym === 'DAI') {

