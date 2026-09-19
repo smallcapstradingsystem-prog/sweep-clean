@@ -370,7 +370,7 @@ export async function estimateChainValueUsdc(chain, preview) {
   // 50 tokens the delay is skipped entirely — real wallets with a
   // handful of tokens stay fast.
   const tokens = preview.tokens || [];
-  const THROTTLE_THRESHOLD = 50;
+  const THROTTLE_THRESHOLD = 25;
   const THROTTLE_DELAY_MS = 50;
   const shouldThrottle = tokens.length >= THROTTLE_THRESHOLD;
 
