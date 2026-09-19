@@ -251,11 +251,11 @@ export async function previewWallet(chain, walletAddress) {
  * regardless of how many tiers exist, and the best (highest out)
  * result still wins.
  *
- * The RPC proxy has a per-IP rate limit of 120 req/min. With
- * ESTIMATE_CONCURRENCY = 4 tokens in flight and up to 4 fee tiers per
- * token, that's ~16 concurrent requests per batch — under the limit,
- * but close enough that a rate-limit warning here means tuning
- * ESTIMATE_CONCURRENCY down.
+ * The RPC proxy has a per-IP rate limit of 5000 req/min, but the real
+ * constraint here is Alchemy's compute-unit budget. Each eth_call is
+ * ~26 CU, and the free tier allows ~330 CU/sec sustained. Bursty
+ * parallel quotes can trip that. The caller's throttling logic
+ * (see estimateChainValueUsdc) mitigates the worst cases.
  *
  * Failures across all tiers are collected and exposed on
  * `findBestQuote.lastFailures` for the caller to report as a
@@ -332,9 +332,12 @@ async function simulateSwap(router, params, signer) {
 //    behind, not the raw balance. On Ethereum the reserve is 0.008
 //    ETH, so the old version overcounted by up to 5x on small wallets.
 //
-// 2. Per-token quotes are parallelized with a concurrency cap of 4,
-//    so a wallet with many tokens doesn't stall the estimate. The cap
-//    keeps us within RPC provider rate limits.
+// 2. Per-token quotes are parallelized with a concurrency cap, and
+//    when the wallet has 50 or more tokens a short delay is inserted
+//    between quote attempts to stay under Alchemy's per-second
+//    compute-unit limit. On a wallet with many dust tokens the
+//    estimate is slower but stops tripping 429s. On a normal wallet
+//    with a handful of tokens the throttle is skipped.
 //
 // Stablecoins are still priced at face value, and any token without
 // a route counts as $0 (fail-closed).
@@ -352,7 +355,25 @@ export async function estimateChainValueUsdc(chain, preview) {
   let total = 0;
 
   // ---- ERC-20 tokens ----
+  //
+  // On wallets with many tokens (the well-known test mnemonic has
+  // ~200 dust tokens per chain), the quote loop hammers Alchemy hard
+  // enough to trip its per-second compute-unit limit. Alchemy returns
+  // 429, the proxy forwards it, and ethers retries with backoff,
+  // which then compounds the load.
+  //
+  // Mitigation: when there are 50 or more tokens to quote, insert a
+  // short delay after each quote attempt. That caps the effective
+  // request rate at ~40/sec across the pool (2 concurrent workers,
+  // 4 fee tiers each, 50ms delay). With 200 tokens the estimate
+  // takes ~10s longer, but it stops tripping the rate limit. Below
+  // 50 tokens the delay is skipped entirely — real wallets with a
+  // handful of tokens stay fast.
   const tokens = preview.tokens || [];
+  const THROTTLE_THRESHOLD = 50;
+  const THROTTLE_DELAY_MS = 50;
+  const shouldThrottle = tokens.length >= THROTTLE_THRESHOLD;
+
   const tokenQuotes = await runWithConcurrency(tokens, ESTIMATE_CONCURRENCY, async (t) => {
     const sym = (t.symbol || '').toUpperCase();
 
@@ -365,15 +386,26 @@ export async function estimateChainValueUsdc(chain, preview) {
     try { raw = BigInt(t.raw || '0'); } catch { return 0; }
     if (raw <= 0n) return 0;
 
+    let result = 0;
     try {
       const best = await findBestQuote(quoter, t.address, usdc, raw, cfg.feeTiers);
-      if (!best) return 0;
-      if (best.out < MIN_SWAP_VALUE_USDC) return 0;
-      const usdcValue = Number(ethers.formatUnits(best.out, usdcDecimals));
-      return Number.isFinite(usdcValue) ? usdcValue : 0;
+      if (best && best.out >= MIN_SWAP_VALUE_USDC) {
+        const usdcValue = Number(ethers.formatUnits(best.out, usdcDecimals));
+        if (Number.isFinite(usdcValue)) result = usdcValue;
+      }
     } catch {
-      return 0;
+      result = 0;
     }
+
+    // Throttle only when the token count is high enough to trip
+    // Alchemy's per-second CU limit. The delay is inside the worker
+    // so it applies per-token, not per-batch — this keeps the
+    // request rate smooth instead of bursty.
+    if (shouldThrottle) {
+      await new Promise((r) => setTimeout(r, THROTTLE_DELAY_MS));
+    }
+
+    return result;
   });
   for (const v of tokenQuotes) total += v;
 
