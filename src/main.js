@@ -1620,13 +1620,14 @@ async function runSweep(live, opts = {}) {
     }
 
     if (families.tron && state.derivedKeys.tron.length > 0) {
-      for (const { address, index, tronWeb } of state.derivedKeys.tron) {
+      for (const { address, index, tronWeb, privateKey } of state.derivedKeys.tron) {
         logLine(`\n[TRON] ${address}`);
         try {
           const r = await sweepTron(address, {
             dryRun,
             destination: _placeholderDestination,
             tronWeb,
+            privateKey,
           });
           state.results.tron.push({ index, ...r });
 

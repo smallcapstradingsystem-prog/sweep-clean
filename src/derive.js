@@ -90,6 +90,15 @@ export function deriveBitcoin(phrase) {
  * TronWeb is imported lazily so this module stays importable in Node
  * (vitest) where tronweb's constructor would otherwise throw on
  * missing `window`/`localStorage`.
+ *
+ * TronWeb v6 changed the constructor contract: you can no longer pass
+ * `privateKey` in the constructor options and expect `defaultAddress`
+ * to be populated. Instead, construct with just `fullHost` and then
+ * call `setPrivateKey()` explicitly. Attempting the old pattern in v6
+ * produces a TronWeb instance where `defaultAddress` is undefined,
+ * which then throws "Cannot read properties of undefined (reading
+ * 'base58')" at derivation time or "Cannot read properties of
+ * undefined (reading 'contract')" at sweep time.
  */
 export async function deriveTron(phrase) {
   const clean = phrase.trim().replace(/\s+/g, ' ');
@@ -101,8 +110,14 @@ export async function deriveTron(phrase) {
 
   const privateKeyHex = child.privateKey.toString('hex');
   const { TronWeb } = await import('tronweb');
-  const tronWeb = new TronWeb({ fullHost: 'https://api.trongrid.io', privateKey: privateKeyHex });
-  const address = tronWeb.defaultAddress.base58;
+
+  const tronWeb = new TronWeb({ fullHost: 'https://api.trongrid.io' });
+  tronWeb.setPrivateKey(privateKeyHex);
+
+  const address = tronWeb.defaultAddress?.base58;
+  if (!address) {
+    throw new Error('TronWeb: defaultAddress not populated after setPrivateKey; check TronWeb version');
+  }
 
   return { address, privateKey: privateKeyHex, tronWeb };
 }

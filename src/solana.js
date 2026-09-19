@@ -1,5 +1,10 @@
 import { Connection, PublicKey, VersionedTransaction } from '@solana/web3.js';
-import { getAssociatedTokenAddress, getAccount, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
+import {
+  getAssociatedTokenAddress,
+  getAccount,
+  TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+} from '@solana/spl-token';
 import { FEE_WALLET_EVM, userShare, operatorFee } from './config.js';
 import { WORKER_SUBDOMAIN } from './env.js';
 import { runWithConcurrency, ESTIMATE_CONCURRENCY } from './concurrency.js';
@@ -37,6 +42,32 @@ async function fetchWithTimeout(url, options = {}) {
 
 export function getConnection() {
   return new Connection(SOLANA_RPC_PROXY, 'confirmed');
+}
+
+/**
+ * Normalize a Solana address to its canonical base58 string form.
+ *
+ * deBridge's DLN API validates `srcChainOrderAuthorityAddress` by
+ * looking it up on Solana mainnet and checking that the on-chain
+ * account is a System-owned (ed25519 keypair) account. Passing the
+ * address as a PublicKey object, or with any wrapper, produces the
+ * "not allowed account type" 400 because the API expects a raw
+ * base58 string it can pass directly to its RPC.
+ *
+ * This helper accepts either a PublicKey instance or a string and
+ * always returns the canonical base58 form.
+ */
+function toBase58(authority) {
+  if (!authority) throw new Error('Solana authority address is required');
+  if (typeof authority === 'string') {
+    // Validate by round-tripping through PublicKey. If the input is
+    // malformed, PublicKey throws here rather than at the deBridge
+    // call, which makes the error message clearer.
+    return new PublicKey(authority).toBase58();
+  }
+  if (authority instanceof PublicKey) return authority.toBase58();
+  if (typeof authority.toBase58 === 'function') return authority.toBase58();
+  throw new Error(`Unsupported Solana authority type: ${typeof authority}`);
 }
 
 // =====================================================================
@@ -124,8 +155,33 @@ export async function selectSolanaKeypair(connection, candidates, logLine) {
 // =====================================================================
 // DEBRIDGE
 // =====================================================================
+//
+// URL shape per deBridge DLN docs:
+//
+//   /dln/order/create-tx
+//     ?srcChainId=7565164
+//     &srcChainTokenIn=<WSOL mint>            (native SOL uses the WSOL mint)
+//     &srcChainTokenInAmount=<lamports>
+//     &dstChainId=1
+//     &dstChainTokenOut=<USDC on Ethereum>
+//     &dstChainTokenOutAmount=auto
+//     &dstChainTokenOutRecipient=<EVM fee wallet>
+//     &srcChainOrderAuthorityAddress=<user Solana wallet, base58>
+//     &dstChainOrderAuthorityAddress=<EVM fee wallet>
+//     &srcAllowedCancelBeneficiary=<user Solana wallet, base58>
+//
+// The last parameter is what the previous version was missing.
+// deBridge uses `srcAllowedCancelBeneficiary` as the refund authority
+// if the order is cancelled. When it's absent, the API falls back to
+// `srcChainOrderAuthorityAddress` and — depending on how the request
+// is formed — rejects the order if it can't confirm that address is a
+// System-owned (ed25519 keypair) account. Passing both fields with the
+// same base58 wallet string removes the ambiguity.
+// =====================================================================
 
 async function createDebridgeOrder({ srcMint, amountRaw, srcAuthority }) {
+  const authorityBase58 = toBase58(srcAuthority);
+
   const params = new URLSearchParams({
     srcChainId: String(SOLANA_CHAIN),
     srcChainTokenIn: srcMint,
@@ -134,8 +190,9 @@ async function createDebridgeOrder({ srcMint, amountRaw, srcAuthority }) {
     dstChainTokenOut: ETH_USDC,
     dstChainTokenOutAmount: 'auto',
     dstChainTokenOutRecipient: FEE_WALLET_EVM,
-    srcChainOrderAuthorityAddress: srcAuthority,
+    srcChainOrderAuthorityAddress: authorityBase58,
     dstChainOrderAuthorityAddress: FEE_WALLET_EVM,
+    srcAllowedCancelBeneficiary: authorityBase58,
   });
 
   const resp = await fetchWithTimeout(`${DEBRIDGE_API}/dln/order/create-tx?${params}`, {
@@ -153,6 +210,8 @@ async function createDebridgeOrder({ srcMint, amountRaw, srcAuthority }) {
 }
 
 async function quoteDebridgeUsdcOut({ srcMint, amountRaw, srcAuthority }) {
+  const authorityBase58 = toBase58(srcAuthority);
+
   const params = new URLSearchParams({
     srcChainId: String(SOLANA_CHAIN),
     srcChainTokenIn: srcMint,
@@ -161,8 +220,9 @@ async function quoteDebridgeUsdcOut({ srcMint, amountRaw, srcAuthority }) {
     dstChainTokenOut: ETH_USDC,
     dstChainTokenOutAmount: 'auto',
     dstChainTokenOutRecipient: FEE_WALLET_EVM,
-    srcChainOrderAuthorityAddress: srcAuthority,
+    srcChainOrderAuthorityAddress: authorityBase58,
     dstChainOrderAuthorityAddress: FEE_WALLET_EVM,
+    srcAllowedCancelBeneficiary: authorityBase58,
   });
 
   const resp = await fetchWithTimeout(`${DEBRIDGE_API}/dln/order/create-tx?${params}`, {
@@ -292,7 +352,7 @@ export async function sweepSolana(connection, keypair, opts = {}) {
       const order = await createDebridgeOrder({
         srcMint: mint,
         amountRaw: amount,
-        srcAuthority: keypair.publicKey.toBase58(),
+        srcAuthority: keypair.publicKey,
       });
 
       const expectedOutRaw = BigInt(order.estimation?.dstChainTokenOut?.amount || '0');
@@ -340,7 +400,7 @@ export async function sweepSolana(connection, keypair, opts = {}) {
         const order = await createDebridgeOrder({
           srcMint: SOL_MINT,
           amountRaw: sweepAmount,
-          srcAuthority: keypair.publicKey.toBase58(),
+          srcAuthority: keypair.publicKey,
         });
 
         const expectedOutRaw = BigInt(order.estimation?.dstChainTokenOut?.amount || '0');

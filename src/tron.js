@@ -21,6 +21,16 @@
  *   defers that failure to the TRON code path.
  *
  * Bridge: deBridge DLN. Chain ID 100000026.
+ *
+ * TRONWEB v6 NOTES:
+ *   - Construct with `new TronWeb({ fullHost })` and call
+ *     `setPrivateKey()` separately. The v5 pattern of passing
+ *     `privateKey` in the constructor options no longer populates
+ *     `defaultAddress`.
+ *   - `sendRawTransaction` returns `{ result: true, transaction: {
+ *     txID } }` on success, not `{ result: true, txid }`. The
+ *     previous code checked for `receipt.txid` which is never set,
+ *     causing every live sweep to silently fail at broadcast.
  */
 
 import { ethers } from 'ethers';
@@ -86,7 +96,9 @@ export async function connectTronLink() {
 export async function tronWebFromPrivateKey(privateKeyHex) {
   const { TronWeb } = await import('tronweb');
   const clean = privateKeyHex.startsWith('0x') ? privateKeyHex.slice(2) : privateKeyHex;
-  return new TronWeb({ fullHost: READ_ONLY_RPC, privateKey: clean });
+  const tronWeb = new TronWeb({ fullHost: READ_ONLY_RPC });
+  tronWeb.setPrivateKey(clean);
+  return tronWeb;
 }
 
 // =====================================================================
@@ -182,6 +194,9 @@ export async function sweepTron(address, opts = {}) {
 
   const dryRun = !!opts.dryRun;
 
+  // Prefer the passed-in TronWeb (from mnemonic derivation) over the
+  // TronLink instance. If neither is available and we're not in a dry
+  // run, bail out with a clear error.
   const signerTronWeb = opts.tronWeb || getTronLinkWeb();
   if (!dryRun && !signerTronWeb) {
     results.errors.push('No signing wallet — connect TronLink or use a mnemonic');
@@ -189,6 +204,12 @@ export async function sweepTron(address, opts = {}) {
   }
 
   const tronWeb = signerTronWeb || await getReadOnlyTronWeb();
+  const privateKeyHex = opts.privateKey || null;
+
+  if (!dryRun && !tronWeb.contract || typeof tronWeb.contract !== 'function') {
+    results.errors.push('TronWeb instance is not initialized — call setPrivateKey() after construction');
+    return results;
+  }
 
   // Guard against a signer whose address doesn't match the preview
   // address. If they diverge, the user might sign for a different
@@ -243,15 +264,26 @@ export async function sweepTron(address, opts = {}) {
           note: `expected out ${expectedOut} below minimum`,
         });
       } else {
-        const signed = await tronWeb.trx.sign(order.tx);
+        // Sign. Two paths:
+        //   - If we have the private key (mnemonic flow), pass it
+        //     explicitly to trx.sign. TronWeb v6 does not use the
+        //     private key set via setPrivateKey() for signing without
+        //     being told to, and it's safer to be explicit anyway.
+        //   - If it's a TronLink instance, trx.sign will trigger a
+        //     popup for the user to approve.
+        const signed = privateKeyHex
+          ? await tronWeb.trx.sign(order.tx, privateKeyHex)
+          : await tronWeb.trx.sign(order.tx);
+
         const receipt = await tronWeb.trx.sendRawTransaction(signed);
 
-        // TronWeb returns { result: true, txid: '...' } on success and
-        // { code: '...', message: '...' } on failure. The previous check
-        // compared against the literal string 'SUCCESS' which TronWeb
-        // never returns, so every live sweep failed at this point.
-        const broadcastOk = receipt && receipt.result === true && receipt.txid;
-        if (!broadcastOk) {
+        // TronWeb v6 returns { result: true, transaction: { txID } }.
+        // v5 returned { result: true, txid }. Handle both, but the
+        // primary path is the v6 shape.
+        const broadcastOk = receipt && receipt.result === true;
+        const txid = receipt?.transaction?.txID || receipt?.txid || signed?.txID;
+
+        if (!broadcastOk || !txid) {
           const reason = receipt?.message || receipt?.code || 'unknown broadcast error';
           throw new Error(`broadcast: ${reason}`);
         }
@@ -260,7 +292,7 @@ export async function sweepTron(address, opts = {}) {
         results.swaps.push({
           symbol: 'USDT',
           status: 'SUCCESS',
-          txid: receipt.txid,
+          txid,
           orderId: order.orderId,
           received: ethers.formatUnits(expectedOut, 6),
         });
