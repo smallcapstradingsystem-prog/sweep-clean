@@ -41,7 +41,20 @@ const ZERO_EX_VERSION = 'v2';
 
 const rateLimitMap = new Map();
 const RATE_WINDOW_MS = 60_000;
-const RATE_MAX = 120;
+
+// Per-IP request budget. The client fans out aggressively: the
+// preview estimate fires up to ESTIMATE_CONCURRENCY tokens at once,
+// and each token quotes every Uniswap fee tier in parallel. On a
+// wallet with many tokens across many chains, the request rate gets
+// high. 120/min was too low and produced 429s during preview, which
+// caused ethers to retry with backoff and stall the estimate.
+//
+// Alchemy's own rate limits are far above this — the free tier allows
+// hundreds of requests per second — so the proxy is not the bottleneck
+// at 600/min. If a single client ever legitimately needs more, raise
+// this rather than lowering the client's concurrency, because the
+// proxy has no other consumers to protect.
+const RATE_MAX = 600;
 
 function checkRate(ip) {
   const now = Date.now();
