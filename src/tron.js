@@ -31,6 +31,11 @@
  *     txID } }` on success, not `{ result: true, txid }`. The
  *     previous code checked for `receipt.txid` which is never set,
  *     causing every live sweep to silently fail at broadcast.
+ *   - The v6 constructor has been observed to return an object
+ *     missing `.contract` and `.trx` in some builds. To make that
+ *     diagnosable, `deriveTron` in derive.js now logs the shape of
+ *     the constructed instance and validates `.contract` before
+ *     returning.
  */
 
 import { ethers } from 'ethers';
@@ -71,6 +76,24 @@ async function fetchWithTimeout(url, options = {}) {
   }
 }
 
+/**
+ * Describe the shape of a TronWeb instance for diagnostics.
+ *
+ * TronWeb v6 has been observed to return a partial object from
+ * `new TronWeb({ fullHost })` in some browser builds — the object is
+ * truthy but missing `.contract` and `.trx`, which then throws
+ * "Cannot read properties of undefined" at the first use. This
+ * helper returns a short summary of what methods are present, so the
+ * sweep log can report which constructor path failed.
+ */
+function describeTronWeb(t) {
+  if (!t) return 'null/undefined';
+  const props = ['contract', 'trx', 'defaultAddress', 'setPrivateKey', 'address'];
+  const present = props.filter((p) => typeof t[p] !== 'undefined').map((p) => `${p}:${typeof t[p]}`);
+  const missing = props.filter((p) => typeof t[p] === 'undefined');
+  return `present=[${present.join(', ')}] missing=[${missing.join(', ')}]`;
+}
+
 // =====================================================================
 // PROVIDER ACCESS
 // =====================================================================
@@ -109,6 +132,11 @@ export async function previewTronWallet(address) {
   const result = { address, trx: null, tokens: [], error: null };
   const tronWeb = getTronLinkWeb() || await getReadOnlyTronWeb();
 
+  if (!tronWeb || typeof tronWeb.trx?.getBalance !== 'function') {
+    result.error = `TronWeb instance is unusable (${describeTronWeb(tronWeb)})`;
+    return result;
+  }
+
   try {
     const sun = await tronWeb.trx.getBalance(address);
     result.trx = {
@@ -118,6 +146,11 @@ export async function previewTronWallet(address) {
     };
   } catch (e) {
     result.error = `TRX balance: ${e.message}`;
+  }
+
+  if (typeof tronWeb.contract !== 'function') {
+    result.error = (result.error ? result.error + '; ' : '') + `TronWeb has no .contract (${describeTronWeb(tronWeb)})`;
+    return result;
   }
 
   try {
@@ -206,9 +239,27 @@ export async function sweepTron(address, opts = {}) {
   const tronWeb = signerTronWeb || await getReadOnlyTronWeb();
   const privateKeyHex = opts.privateKey || null;
 
-  if (!dryRun && !tronWeb.contract || typeof tronWeb.contract !== 'function') {
-    results.errors.push('TronWeb instance is not initialized — call setPrivateKey() after construction');
-    return results;
+  // Guard on the TronWeb instance's shape before touching any of its
+  // methods. The previous version wrote `!tronWeb.contract || ...`
+  // which itself threw when `tronWeb` was undefined — the guard
+  // crashed on the very thing it was meant to guard against.
+  //
+  // The `describeTronWeb` call in the error message surfaces which
+  // methods are missing, so the next failure is diagnostic instead
+  // of a bare TypeError.
+  if (!dryRun) {
+    if (!tronWeb) {
+      results.errors.push('TronWeb instance is undefined — check derivation or TronLink connection');
+      return results;
+    }
+    if (typeof tronWeb.contract !== 'function') {
+      results.errors.push(`TronWeb has no .contract method (${describeTronWeb(tronWeb)})`);
+      return results;
+    }
+    if (typeof tronWeb.trx?.sign !== 'function') {
+      results.errors.push(`TronWeb has no .trx.sign method (${describeTronWeb(tronWeb)})`);
+      return results;
+    }
   }
 
   // Guard against a signer whose address doesn't match the preview
